@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Story Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Inter:wght@400..700&display=swap">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+  <!-- Welcome screen: shown while no stories exist yet -->
+  <main id="welcome" class="welcome" hidden>
+    <div class="welcome__inner">
+      <p class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.6-2-8-1.6v12.2c3.4-.4 6.2.2 8 1.6 1.8-1.4 4.6-2 8-1.6V5.4c-3.4-.4-6.2.2-8 1.6Z"/><path d="M12 7v12.2"/></svg>
+        </span>
+        Story Studio
+      </p>
+
+      <h1 class="welcome__title">Create your <em>big</em> story</h1>
+      <p class="welcome__lead">Every great story starts with a name.</p>
+
+      <form id="welcome-form" class="welcome__form" autocomplete="off">
+        <label class="sr-only" for="welcome-name">Story name</label>
+        <input id="welcome-name" class="welcome__input" type="text" maxlength="120" placeholder="Name your story…">
+        <button id="welcome-submit" class="btn btn--primary btn--lg" type="submit" disabled>
+          Create story
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+      <p class="welcome__hint">Press <kbd>Enter</kbd> to start writing</p>
+    </div>
+  </main>
+
+  <!-- Workspace: story list on the left, chapters on the right -->
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <p class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.6-2-8-1.6v12.2c3.4-.4 6.2.2 8 1.6 1.8-1.4 4.6-2 8-1.6V5.4c-3.4-.4-6.2.2-8 1.6Z"/><path d="M12 7v12.2"/></svg>
+        </span>
+        Story Studio
+      </p>
+
+      <nav aria-labelledby="my-stories-heading">
+        <h2 id="my-stories-heading" class="sidebar__heading">My stories</h2>
+        <ul id="story-list" class="story-list"></ul>
+      </nav>
+
+      <button id="new-story-btn" class="new-story-btn" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        New story
+      </button>
+      <form id="new-story-form" class="new-story-form" autocomplete="off" hidden>
+        <label class="sr-only" for="new-story-name">New story name</label>
+        <input id="new-story-name" type="text" maxlength="120" placeholder="Name your story…">
+        <button class="icon-btn" type="submit" aria-label="Create story">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+
+      <p class="sidebar__note">Your stories are saved in this browser.</p>
+    </aside>
+
+    <main class="editor">
+      <div id="editor-inner" class="editor__inner">
+        <header class="story-header">
+          <p class="eyebrow">Your story</p>
+          <h1 id="story-title" class="story-title"></h1>
+          <p id="story-meta" class="story-meta"></p>
+        </header>
+
+        <button id="first-chapter-btn" class="first-chapter" type="button" aria-label="Add your first chapter" hidden>
+          <span class="first-chapter__icon" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          </span>
+          <span>
+            <span class="first-chapter__title">Add your first chapter</span>
+            <span class="first-chapter__sub">Start by giving it a title</span>
+          </span>
+        </button>
+
+        <ol id="chapter-list" class="chapter-list"></ol>
+
+        <button id="add-chapter-btn" class="add-chapter" type="button" hidden>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          Add a new chapter
+        </button>
+      </div>
+    </main>
+  </div>
+
+</body>
+</html>
