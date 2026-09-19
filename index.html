@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Story Studio</title>
+  <title>Interactive Stories</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Inter:wght@400..700&display=swap">
@@ -13,6 +13,12 @@
 </head>
 <body>
 
+  <!-- Shown while the stories load from Firestore, or if they can't be loaded -->
+  <div id="status" class="status" role="status">
+    <span class="status__spinner" aria-hidden="true"></span>
+    <p id="status-text">Loading your stories…</p>
+  </div>
+
   <!-- Welcome screen: shown while no stories exist yet -->
   <main id="welcome" class="welcome" hidden>
     <div class="welcome__inner">
@@ -20,7 +26,7 @@
         <span class="brand__mark" aria-hidden="true">
           <svg class="icon" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.6-2-8-1.6v12.2c3.4-.4 6.2.2 8 1.6 1.8-1.4 4.6-2 8-1.6V5.4c-3.4-.4-6.2.2-8 1.6Z"/><path d="M12 7v12.2"/></svg>
         </span>
-        Story Studio
+        Interactive Stories
       </p>
 
       <h1 class="welcome__title">Create your <em>big</em> story</h1>
@@ -34,7 +40,6 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
         </button>
       </form>
-      <p class="welcome__hint">Press <kbd>Enter</kbd> to start writing</p>
     </div>
   </main>
 
@@ -45,7 +50,7 @@
         <span class="brand__mark" aria-hidden="true">
           <svg class="icon" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.6-2-8-1.6v12.2c3.4-.4 6.2.2 8 1.6 1.8-1.4 4.6-2 8-1.6V5.4c-3.4-.4-6.2.2-8 1.6Z"/><path d="M12 7v12.2"/></svg>
         </span>
-        Story Studio
+        Interactive Stories
       </p>
 
       <nav aria-labelledby="my-stories-heading">
@@ -65,7 +70,7 @@
         </button>
       </form>
 
-      <p class="sidebar__note">Your stories are saved in this browser.</p>
+      <p class="sidebar__note">Your stories are saved online and sync across devices.</p>
     </aside>
 
     <main class="editor">
@@ -94,6 +99,26 @@
         </button>
       </div>
     </main>
+  </div>
+
+  <!-- Asks before a story is deleted -->
+  <dialog id="delete-dialog" class="dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-text">
+    <form method="dialog" class="dialog__body">
+      <h2 id="delete-dialog-title" class="dialog__title"></h2>
+      <p id="delete-dialog-text" class="dialog__text"></p>
+      <div class="dialog__actions">
+        <button class="btn btn--ghost" value="cancel" autofocus>Cancel</button>
+        <button class="btn btn--danger" value="delete">Delete story</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Error message, e.g. when a change couldn't be saved -->
+  <div id="notice" class="notice" role="alert" hidden>
+    <p id="notice-text"></p>
+    <button id="notice-close" class="notice__close" type="button" aria-label="Dismiss">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
   </div>
 
 </body>

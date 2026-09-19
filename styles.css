@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Story Studio
+   Interactive Stories
    ========================================================================== */
 
 :root {
@@ -16,6 +16,9 @@
   --accent-text: #983a22; /* accent dark enough for small text */
   --accent-soft: #f4e3da;
   --on-accent: #ffffff;
+  --danger: #c0262d;
+  --danger-hover: #a51f25;
+  --danger-text: #b42318;
   --shadow: 0 1px 2px rgb(64 42 20 / 0.05), 0 10px 30px -18px rgb(64 42 20 / 0.35);
 
   --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
@@ -39,6 +42,7 @@
     --accent-text: #f3a68a;
     --accent-soft: #3a261e;
     --on-accent: #1b0f0a;
+    --danger-text: #ff8f87;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.3), 0 14px 34px -20px rgb(0 0 0 / 0.7);
 
     color-scheme: dark;
@@ -182,15 +186,23 @@ button {
   background: color-mix(in srgb, var(--accent-soft), var(--accent) 14%);
 }
 
-kbd {
-  display: inline-block;
-  padding: 1px 7px;
-  font: 600 0.8em/1.5 var(--font-ui);
+.btn--ghost {
   color: var(--ink-soft);
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-bottom-width: 2px;
-  border-radius: 6px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+.btn--ghost:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.btn--danger {
+  color: #ffffff;
+  background: var(--danger);
+}
+
+.btn--danger:hover {
+  background: var(--danger-hover);
 }
 
 .shake {
@@ -213,7 +225,7 @@ kbd {
 
 .welcome__inner {
   width: 100%;
-  max-width: 780px;
+  max-width: 920px; /* fits the headline on one line even at its largest size (~815px) */
   text-align: center;
   animation: rise 0.6s ease both;
 }
@@ -224,7 +236,8 @@ kbd {
   font-size: clamp(3rem, 10vw, 6.5rem);
   font-weight: 500;
   line-height: 0.98;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.02em;
+  word-spacing: 0.06em;
   text-wrap: balance;
 }
 
@@ -277,12 +290,6 @@ kbd {
   opacity: 1;
 }
 
-.welcome__hint {
-  margin-top: 18px;
-  font-size: 0.875rem;
-  color: var(--muted);
-}
-
 /* Workspace
    ========================================================================== */
 
@@ -329,12 +336,16 @@ kbd {
   list-style: none;
 }
 
+.story-list li {
+  position: relative;
+}
+
 .story-link {
   position: relative;
   display: grid;
   gap: 1px;
   width: 100%;
-  padding: 10px 12px 10px 16px;
+  padding: 10px 44px 10px 16px; /* room on the right for the delete button */
   text-align: left;
   background: transparent;
   border: 0;
@@ -376,6 +387,47 @@ kbd {
 .story-link__meta {
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+.story-delete {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.story-delete .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Visible on the open story, on hover and on keyboard focus (always on touch screens, below). */
+.story-link[aria-current="true"] + .story-delete,
+.story-list li:hover .story-delete,
+.story-delete:focus-visible {
+  opacity: 1;
+}
+
+.story-delete:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+@media (hover: none) {
+  .story-delete {
+    opacity: 1;
+  }
 }
 
 .new-story-btn {
@@ -685,6 +737,123 @@ kbd {
   background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
 }
 
+/* Loading and errors
+   ========================================================================== */
+
+.status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.status__spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.status.is-error .status__spinner {
+  display: none;
+}
+
+.status.is-error p {
+  max-width: 46ch;
+  color: var(--ink);
+}
+
+.notice {
+  position: fixed;
+  right: 0;
+  bottom: 24px;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  max-width: min(640px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 12px 10px 12px 18px;
+  color: #ffffff;
+  background: var(--danger);
+  border-radius: 14px;
+  box-shadow: 0 18px 40px -16px rgb(0 0 0 / 0.5);
+  animation: rise 0.25s ease;
+}
+
+.notice__close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+}
+
+.notice__close:hover {
+  background: rgb(255 255 255 / 0.15);
+}
+
+/* Delete confirmation
+   ========================================================================== */
+
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 0;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 0 30px 80px -24px rgb(0 0 0 / 0.5);
+}
+
+.dialog[open] {
+  animation: rise 0.25s ease;
+}
+
+.dialog::backdrop {
+  background: rgb(22 16 12 / 0.5);
+}
+
+/* The form fills the dialog, so a click that lands on the dialog itself is a click on the backdrop. */
+.dialog__body {
+  padding: 28px;
+}
+
+.dialog__title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 500;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dialog__text {
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 28px;
+}
+
 /* Animations
    ========================================================================== */
 
@@ -696,6 +865,12 @@ kbd {
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -729,6 +904,7 @@ kbd {
 @media (max-width: 860px) {
   .workspace {
     grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr; /* the story list stays compact; the chapters take the rest */
   }
 
   .sidebar {

@@ -1,69 +1,251 @@
 /*
- * Story Studio: plain JavaScript, no frameworks.
+ * Interactive Stories: plain JavaScript, no frameworks.
  *
- * Everything lives in one `state` object that is saved to localStorage:
- *   {
- *     selectedId: "…",
- *     stories: [{ id, name, createdAt, chapters: [{ id, title, content }] }]
+ * Stories live in Cloud Firestore, so they sync across browsers and devices. Each story is one
+ * document in the "stories" collection:
+ *
+ *   stories/{storyId}: {
+ *     name: 'The Lighthouse Keeper',
+ *     createdAt: 1789752158015,
+ *     chapters: {
+ *       '<chapterId>': { title: 'A Light in the Storm', content: '…', createdAt: 1789752160000 },
+ *     },
  *   }
+ *
+ * Chapters are a map rather than an array so that every change writes only the field it touches
+ * (one chapter's title or text), and edits made on two devices don't overwrite each other.
  */
 (function () {
   'use strict';
 
-  const STORAGE_KEY = 'story-studio';
+  const APP_NAME = 'Interactive Stories';
+
+  const firebaseConfig = {
+    apiKey: 'AIzaSyDg1F_O-uYEZPjLoAgOyqC6ARpQCtgierM',
+    authDomain: 'interactivestories-85a09.firebaseapp.com',
+    projectId: 'interactivestories-85a09',
+    storageBucket: 'interactivestories-85a09.firebasestorage.app',
+    messagingSenderId: '346183277708',
+    appId: '1:346183277708:web:68a38b15874fe2059e2fa9',
+  };
+
+  // The Firebase SDK is loaded straight from Google's CDN, so there's no npm install or build step.
+  const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/12.19.0';
+
+  // Which story was open last is a per-device preference, so it stays in this browser.
+  const OPEN_STORY_KEY = 'interactive-stories:open-story';
 
   // ---------------------------------------------------------------------------
   // Data
   // ---------------------------------------------------------------------------
 
-  const state = loadState();
+  // Local copy of the "stories" collection (with chapters as a sorted array), kept current by a
+  // Firestore listener. Changes show up here at once and are written to Firestore in the background.
+  const state = { stories: [], selectedId: readOpenStory() };
 
-  function loadState() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      if (saved && Array.isArray(saved.stories)) {
-        if (!saved.stories.some((story) => story.id === saved.selectedId)) {
-          saved.selectedId = saved.stories.length ? saved.stories[0].id : null;
-        }
-        return saved;
-      }
-    } catch (error) {
-      console.warn('Could not read saved stories.', error);
-    }
-    return { selectedId: null, stories: [] };
-  }
-
-  function saveNow() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch (error) {
-      console.warn('Could not save stories.', error);
-    }
-  }
-
-  // While writing a chapter, save (and refresh the word count) once typing pauses.
-  let typingTimer = 0;
-  function saveAfterTyping() {
-    clearTimeout(typingTimer);
-    typingTimer = setTimeout(() => {
-      saveNow();
-      updateMeta();
-    }, 400);
-  }
+  let firestore = null; // the Firestore SDK functions, once loaded
+  let db = null;
+  let loaded = false; // whether the first batch of stories has arrived
 
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const currentStory = () => state.stories.find((story) => story.id === state.selectedId);
-
-  function createStory(name) {
-    const story = { id: newId(), name, createdAt: Date.now(), chapters: [] };
-    state.stories.push(story);
-    return story;
-  }
+  const byCreation = (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1);
+  const storyRef = (id) => firestore.doc(db, 'stories', id);
 
   const countWords = (text) => (text.match(/\S+/g) || []).length;
   const plural = (count, word) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
   const chapterCount = (story) =>
     story.chapters.length ? plural(story.chapters.length, 'chapter') : 'No chapters yet';
+
+  function readOpenStory() {
+    try {
+      return localStorage.getItem(OPEN_STORY_KEY);
+    } catch (error) {
+      return null; // storage is blocked: the first story opens instead
+    }
+  }
+
+  function rememberOpenStory() {
+    try {
+      localStorage.setItem(OPEN_STORY_KEY, state.selectedId);
+    } catch (error) {
+      // Not remembering the open story is harmless.
+    }
+  }
+
+  // --- Writing to Firestore ----------------------------------------------------
+
+  /** Firestore applies a write locally straight away; if the server rejects it, say so. */
+  function save(write) {
+    write.catch((error) => showNotice(`Couldn’t save your changes. ${explain(error)}`));
+  }
+
+  function createStory(name) {
+    const ref = firestore.doc(firestore.collection(db, 'stories')); // a new id, generated locally
+    const story = { id: ref.id, name, createdAt: Date.now(), chapters: [] };
+    state.stories.push(story);
+    save(firestore.setDoc(ref, { name, createdAt: story.createdAt, chapters: {} }));
+    return story;
+  }
+
+  function addChapter(story, title) {
+    const chapter = { id: newId(), title, content: '', createdAt: Date.now() };
+    story.chapters.push(chapter);
+    story.chapters.sort(byCreation);
+    save(firestore.updateDoc(storyRef(story.id), new firestore.FieldPath('chapters', chapter.id), {
+      title,
+      content: '',
+      createdAt: chapter.createdAt,
+    }));
+    return chapter;
+  }
+
+  function renameChapter(story, chapter, title) {
+    chapter.title = title;
+    save(firestore.updateDoc(storyRef(story.id), new firestore.FieldPath('chapters', chapter.id, 'title'), title));
+  }
+
+  // Chapter text that was typed but not sent yet (chapter id → { story, chapter }). It is sent once
+  // typing pauses, and until then updates from other devices don't overwrite it.
+  const unsaved = new Map();
+  let typingTimer = 0;
+
+  function contentChanged(story, chapter) {
+    unsaved.set(chapter.id, { story, chapter });
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(saveTyping, 800);
+  }
+
+  function saveTyping() {
+    clearTimeout(typingTimer);
+    if (!unsaved.size) return;
+
+    for (const { story, chapter } of unsaved.values()) {
+      if (!state.stories.includes(story)) continue; // the story was deleted meanwhile
+      save(firestore.updateDoc(storyRef(story.id), new firestore.FieldPath('chapters', chapter.id, 'content'), chapter.content));
+    }
+    unsaved.clear();
+    updateMeta();
+  }
+
+  // --- Reading from Firestore --------------------------------------------------
+
+  async function start() {
+    try {
+      const [{ initializeApp }, sdk] = await Promise.all([
+        import(`${FIREBASE_SDK}/firebase-app.js`),
+        import(`${FIREBASE_SDK}/firebase-firestore.js`),
+      ]);
+      firestore = sdk;
+      db = firestore.initializeFirestore(initializeApp(firebaseConfig), {
+        // A copy kept in the browser makes the app open fast and keep working offline.
+        localCache: firestore.persistentLocalCache({ tabManager: firestore.persistentMultipleTabManager() }),
+      });
+    } catch (error) {
+      console.error(error);
+      showStatus('Couldn’t load Firebase. Check your internet connection and reload the page.');
+      return;
+    }
+
+    firestore.onSnapshot(firestore.collection(db, 'stories'), applySnapshot, (error) => {
+      console.error(error);
+      if (loaded) showNotice(`Your stories stopped syncing. ${explain(error)} Reload the page to try again.`);
+      else showStatus(`Couldn’t load your stories. ${explain(error)}`);
+    });
+  }
+
+  /** Turns a Firestore document into the shape the page works with (chapters as a sorted array). */
+  function storyFromDoc(doc) {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      name: String(data.name ?? 'Untitled story'),
+      createdAt: Number(data.createdAt) || 0,
+      chapters: Object.entries(data.chapters ?? {})
+        .map(([id, chapter]) => ({
+          id,
+          title: String(chapter.title ?? ''),
+          content: String(chapter.content ?? ''),
+          createdAt: Number(chapter.createdAt) || 0,
+        }))
+        .sort(byCreation),
+    };
+  }
+
+  /**
+   * Copies the latest version of a story into the local one. The objects are updated in place
+   * because the page holds on to them, and chapter text still being typed here is left alone.
+   * Returns whether anything changed.
+   */
+  function mergeStory(story, latest) {
+    let changed = story.name !== latest.name;
+    story.name = latest.name;
+    story.createdAt = latest.createdAt;
+
+    const known = new Map(story.chapters.map((chapter) => [chapter.id, chapter]));
+    const chapters = latest.chapters.map((incoming) => {
+      const chapter = known.get(incoming.id);
+      if (!chapter) return incoming;
+      if (chapter.title !== incoming.title) {
+        chapter.title = incoming.title;
+        changed = true;
+      }
+      if (chapter.content !== incoming.content && !unsaved.has(chapter.id)) {
+        chapter.content = incoming.content;
+        changed = true;
+      }
+      chapter.createdAt = incoming.createdAt;
+      return chapter;
+    });
+
+    if (chapters.length !== story.chapters.length || chapters.some((chapter, i) => chapter !== story.chapters[i])) {
+      changed = true;
+    }
+    story.chapters = chapters;
+    return changed;
+  }
+
+  /** Applies changes from Firestore: the first load, edits and deletions from other devices, and this device's own writes coming back. */
+  function applySnapshot(snapshot) {
+    const openIndex = state.stories.findIndex((story) => story.id === state.selectedId);
+    let changed = false;
+    let openStoryChanged = false;
+
+    for (const change of snapshot.docChanges()) {
+      const index = state.stories.findIndex((story) => story.id === change.doc.id);
+      if (change.type === 'removed') {
+        if (index !== -1) {
+          state.stories.splice(index, 1);
+          changed = true;
+        }
+      } else if (index === -1) {
+        state.stories.push(storyFromDoc(change.doc));
+        changed = true;
+      } else if (mergeStory(state.stories[index], storyFromDoc(change.doc))) {
+        changed = true;
+        if (change.doc.id === state.selectedId) openStoryChanged = true;
+      }
+    }
+    state.stories.sort(byCreation);
+
+    if (!loaded) {
+      loaded = true;
+      if (!currentStory() && state.stories.length) state.selectedId = state.stories[0].id;
+      render();
+      return;
+    }
+    if (!changed) return; // only this device's own writes, which are already on screen
+
+    if (!state.stories.length) {
+      render(); // every story was deleted elsewhere: back to the welcome screen
+    } else if (!currentStory()) {
+      // The open story was deleted elsewhere (or these are the first stories): open the nearest one.
+      showStory(state.stories[Math.min(Math.max(openIndex, 0), state.stories.length - 1)].id);
+    } else {
+      renderStoryList();
+      if (openStoryChanged) syncStory();
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // DOM helpers
@@ -84,12 +266,17 @@
     return node;
   }
 
-  function penIcon() {
+  const ICONS = {
+    pen: '<path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1Z"/><path d="m14 7 3 3"/>',
+    trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 12.5h10L18 7M10 11v5M14 11v5"/>',
+  };
+
+  function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'icon');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
-    svg.innerHTML = '<path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1Z"/><path d="m14 7 3 3"/>';
+    svg.innerHTML = ICONS[name];
     return svg;
   }
 
@@ -116,11 +303,25 @@
     if (window.scrollY !== scrollY) window.scrollTo(scrollX, scrollY);
   }
 
+  /** A short explanation of a Firestore error, with a hint for the common ones. */
+  function explain(error) {
+    switch (error.code) {
+      case 'permission-denied':
+        return 'Firestore denied access: check the security rules of your database in the Firebase console.';
+      case 'unavailable':
+        return 'Firestore can’t be reached right now.';
+      default:
+        return error.message;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Rendering
   // ---------------------------------------------------------------------------
 
   const ui = {
+    status: $('status'),
+    statusText: $('status-text'),
     welcome: $('welcome'),
     welcomeForm: $('welcome-form'),
     welcomeInput: $('welcome-name'),
@@ -136,6 +337,12 @@
     firstChapterButton: $('first-chapter-btn'),
     chapterList: $('chapter-list'),
     addChapterButton: $('add-chapter-btn'),
+    deleteDialog: $('delete-dialog'),
+    deleteTitle: $('delete-dialog-title'),
+    deleteText: $('delete-dialog-text'),
+    notice: $('notice'),
+    noticeText: $('notice-text'),
+    noticeClose: $('notice-close'),
   };
 
   // The <li> of a chapter whose title is being typed but hasn't been saved yet.
@@ -143,6 +350,7 @@
 
   function render() {
     const hasStories = state.stories.length > 0;
+    ui.status.hidden = true;
     ui.welcome.hidden = hasStories;
     ui.workspace.hidden = !hasStories;
 
@@ -150,8 +358,22 @@
       renderStoryList();
       renderStory();
     } else {
+      document.title = APP_NAME;
+      closeNewStoryForm();
       ui.welcomeInput.focus();
     }
+  }
+
+  /** Replaces the loading message with an error, when the stories can't be loaded at all. */
+  function showStatus(message) {
+    ui.status.hidden = false;
+    ui.status.classList.add('is-error');
+    ui.statusText.textContent = message;
+  }
+
+  function showNotice(message) {
+    ui.noticeText.textContent = message;
+    ui.notice.hidden = false;
   }
 
   /** Updates the sidebar in place, so a click on it is never lost to a re-render. */
@@ -166,15 +388,18 @@
         item = h('li', { 'data-id': story.id },
           h('button', { class: 'story-link', type: 'button', onclick: () => selectStory(story.id) },
             h('span', { class: 'story-link__name' }),
-            h('span', { class: 'story-link__meta' })));
+            h('span', { class: 'story-link__meta' })),
+          h('button', { class: 'story-delete', type: 'button', title: 'Delete story', onclick: () => askToDeleteStory(story.id) },
+            icon('trash')));
       }
 
-      const button = item.firstElementChild;
-      button.title = story.name;
-      button.children[0].textContent = story.name;
-      button.children[1].textContent = chapterCount(story);
-      if (story.id === state.selectedId) button.setAttribute('aria-current', 'true');
-      else button.removeAttribute('aria-current');
+      const [link, deleteButton] = item.children;
+      link.title = story.name;
+      link.children[0].textContent = story.name;
+      link.children[1].textContent = chapterCount(story);
+      deleteButton.setAttribute('aria-label', `Delete “${story.name}”`);
+      if (story.id === state.selectedId) link.setAttribute('aria-current', 'true');
+      else link.removeAttribute('aria-current');
 
       if (ui.storyList.children[index] !== item) {
         ui.storyList.insertBefore(item, ui.storyList.children[index] || null);
@@ -184,18 +409,41 @@
     items.forEach((item) => item.remove());
   }
 
+  /** Shows the open story from scratch (after switching stories). */
   function renderStory() {
-    const story = currentStory();
     draftChapter = null;
+    ui.chapterList.replaceChildren();
+    syncStory();
+  }
 
-    document.title = `${story.name} · Story Studio`;
+  /** Brings the open story on screen up to date without disturbing anything being edited. */
+  function syncStory() {
+    const story = currentStory();
+    document.title = `${story.name} · ${APP_NAME}`;
     ui.storyTitle.textContent = story.name;
-    ui.chapterList.replaceChildren(
-      ...story.chapters.map((chapter, index) => chapterItem(story, chapter, index + 1))
-    );
-    ui.chapterList.querySelectorAll('textarea').forEach(autosize);
+    syncChapters(story);
     updateChapterButtons(story);
     updateMeta(story);
+  }
+
+  /** Adds, updates, reorders and removes chapter cards to match the story. A new chapter still being named stays last. */
+  function syncChapters(story) {
+    const cards = new Map();
+    for (const card of ui.chapterList.children) {
+      if (card.dataset.id) cards.set(card.dataset.id, card);
+    }
+
+    let previous = null;
+    story.chapters.forEach((chapter, index) => {
+      const card = cards.get(chapter.id) || chapterItem(story, chapter);
+      cards.delete(chapter.id);
+      const expected = previous ? previous.nextSibling : ui.chapterList.firstChild;
+      if (card !== expected) ui.chapterList.insertBefore(card, expected);
+      card.sync(index + 1);
+      previous = card;
+    });
+
+    cards.forEach((card) => card.remove());
   }
 
   /** "Add your first chapter" while there are none, "Add a new chapter" after that. */
@@ -206,6 +454,7 @@
   }
 
   function updateMeta(story = currentStory()) {
+    if (!story) return; // e.g. a late save after the last story was deleted
     const words = story.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0);
     ui.storyMeta.textContent = words
       ? `${chapterCount(story)} · ${plural(words, 'word')}`
@@ -213,28 +462,33 @@
   }
 
   /** One chapter card: its number, its title (click to rename) and its content. */
-  function chapterItem(story, chapter, number) {
+  function chapterItem(story, chapter) {
+    const label = h('p', { class: 'chapter__label' });
     const head = h('div', { class: 'chapter__head' });
     const body = h('div', { class: 'chapter__body' });
+    const item = h('li', { class: 'chapter', 'data-id': chapter.id }, label, head, body);
+
+    let number = 0;
+    let titleText = null; // the title's text node (null while the title is being renamed)
+    let textarea = null; // the content box, once there is content or it is being written
 
     function showTitle() {
+      titleText = document.createTextNode(chapter.title);
       head.replaceChildren(
         h('h2', { class: 'chapter__title' },
           h('button', { class: 'chapter__title-btn', type: 'button', title: 'Rename chapter', onclick: renameTitle },
-            chapter.title, penIcon())));
+            titleText, icon('pen'))));
     }
 
     function renameTitle() {
+      titleText = null;
       const input = titleInput(chapter.title, `Chapter ${number} title`);
       head.replaceChildren(input);
       input.focus();
       input.select();
 
       whenTitleDone(input, (title, byKeyboard) => {
-        if (title) {
-          chapter.title = title;
-          saveNow();
-        }
+        if (title && title !== chapter.title) renameChapter(story, chapter, title);
         showTitle();
         if (byKeyboard) head.querySelector('button').focus();
       });
@@ -243,11 +497,11 @@
     function showAddContentButton() {
       body.replaceChildren(
         h('button', { class: 'btn btn--soft chapter__add-content', type: 'button', onclick: () => showContent(true) },
-          penIcon(), 'Add chapter content'));
+          icon('pen'), 'Add chapter content'));
     }
 
     function showContent(focus) {
-      const textarea = h('textarea', {
+      textarea = h('textarea', {
         class: 'chapter__content',
         rows: '3',
         placeholder: 'Start writing…',
@@ -256,24 +510,35 @@
         oninput: () => {
           chapter.content = textarea.value;
           autosize(textarea);
-          saveAfterTyping();
+          contentChanged(story, chapter);
         },
       });
       body.replaceChildren(textarea);
-      if (focus) {
-        autosize(textarea);
-        textarea.focus();
-      }
+      if (item.isConnected) autosize(textarea);
+      if (focus) textarea.focus();
     }
+
+    /** Shows the chapter's current number, title and text, e.g. after a change on another device. */
+    item.sync = (position) => {
+      number = position;
+      label.textContent = `Chapter ${number}`;
+      if (titleText && titleText.data !== chapter.title) titleText.data = chapter.title;
+      if (!textarea && chapter.content) showContent(false);
+      if (!textarea) return;
+
+      textarea.setAttribute('aria-label', `Chapter ${number} content`);
+      if (textarea.value !== chapter.content && !unsaved.has(chapter.id)) {
+        const { selectionStart, selectionEnd } = textarea;
+        textarea.value = chapter.content;
+        if (document.activeElement === textarea) textarea.setSelectionRange(selectionStart, selectionEnd);
+      }
+      autosize(textarea);
+    };
 
     showTitle();
     if (chapter.content) showContent(false);
     else showAddContentButton();
-
-    return h('li', { class: 'chapter' },
-      h('p', { class: 'chapter__label' }, `Chapter ${number}`),
-      head,
-      body);
+    return item;
   }
 
   function titleInput(value, label) {
@@ -325,7 +590,7 @@
   /** Selects a story and shows it on the right. */
   function showStory(id) {
     state.selectedId = id;
-    saveNow();
+    rememberOpenStory();
     render();
     window.scrollTo(0, 0);
     animateIn(ui.editor);
@@ -340,10 +605,9 @@
     if (draftChapter) return;
 
     const story = currentStory();
-    const number = story.chapters.length + 1;
-    const input = titleInput('', `Chapter ${number} title`);
+    const input = titleInput('', `Chapter ${story.chapters.length + 1} title`);
     const draft = h('li', { class: 'chapter chapter--draft' },
-      h('p', { class: 'chapter__label' }, `Chapter ${number}`),
+      h('p', { class: 'chapter__label' }, `Chapter ${story.chapters.length + 1}`),
       input,
       h('p', { class: 'chapter__hint' }, 'Press Enter to save · Esc to cancel'));
 
@@ -357,24 +621,21 @@
     whenTitleDone(input, (title, byKeyboard) => {
       if (!draft.isConnected) return; // another story was opened in the meantime
       draftChapter = null;
-      let nextFocus = null;
+      draft.remove();
 
+      let card = null;
       if (title) {
-        const chapter = { id: newId(), title, content: '' };
-        story.chapters.push(chapter);
-        saveNow();
-        const item = chapterItem(story, chapter, number);
-        draft.replaceWith(item);
-        nextFocus = item.querySelector('.chapter__add-content');
-      } else {
-        draft.remove();
+        const chapter = addChapter(story, title);
+        syncChapters(story);
+        renderStoryList(); // refreshes the chapter count in the sidebar
+        card = ui.chapterList.querySelector(`[data-id="${chapter.id}"]`);
       }
-
       updateChapterButtons(story);
       updateMeta(story);
-      renderStoryList(); // refreshes the chapter count in the sidebar
+
       if (byKeyboard) {
-        (nextFocus || (story.chapters.length ? ui.addChapterButton : ui.firstChapterButton)).focus();
+        if (card) card.querySelector('.chapter__add-content').focus();
+        else (story.chapters.length ? ui.addChapterButton : ui.firstChapterButton).focus();
       }
     });
   }
@@ -383,6 +644,42 @@
     ui.newStoryForm.reset();
     ui.newStoryForm.hidden = true;
     ui.newStoryButton.hidden = false;
+  }
+
+  // The story waiting for the user to confirm its deletion.
+  let storyToDelete = null;
+
+  function askToDeleteStory(id) {
+    storyToDelete = state.stories.find((story) => story.id === id);
+    const chapters = storyToDelete.chapters.length;
+    ui.deleteTitle.textContent = `Delete “${storyToDelete.name}”?`;
+    ui.deleteText.textContent = chapters
+      ? `Its ${plural(chapters, 'chapter')} will be deleted too. This can’t be undone.`
+      : 'This can’t be undone.';
+    ui.deleteDialog.returnValue = ''; // closing with Escape keeps the old value, so clear it
+    ui.deleteDialog.showModal();
+  }
+
+  /** Removes a story. With no stories left, the welcome screen comes back. */
+  function deleteStory(id) {
+    const index = state.stories.findIndex((story) => story.id === id);
+    if (index === -1) return; // already deleted, e.g. on another device
+    state.stories.splice(index, 1);
+    save(firestore.deleteDoc(storyRef(id)));
+
+    if (!state.stories.length) {
+      render();
+      return;
+    }
+
+    if (id === state.selectedId) {
+      // Open the story that moved into its place (or the one above it).
+      showStory((state.stories[index] || state.stories[index - 1]).id);
+    } else {
+      renderStoryList();
+    }
+    // Keep keyboard focus in the list, where the deleted story was.
+    ui.storyList.children[Math.min(index, state.stories.length - 1)].firstElementChild.focus();
   }
 
   // ---------------------------------------------------------------------------
@@ -440,6 +737,21 @@
   ui.firstChapterButton.addEventListener('click', startNewChapter);
   ui.addChapterButton.addEventListener('click', startNewChapter);
 
+  // Delete confirmation
+  ui.deleteDialog.addEventListener('close', () => {
+    if (ui.deleteDialog.returnValue === 'delete') deleteStory(storyToDelete.id);
+    storyToDelete = null;
+  });
+
+  // A click on the dialog element itself (not its form) is a click on the dimmed backdrop: cancel.
+  ui.deleteDialog.addEventListener('click', (event) => {
+    if (event.target === ui.deleteDialog) ui.deleteDialog.close();
+  });
+
+  ui.noticeClose.addEventListener('click', () => {
+    ui.notice.hidden = true;
+  });
+
   // Chapter text boxes depend on the page width and the web font, so re-fit them when either changes.
   const refitTextareas = () => ui.chapterList.querySelectorAll('textarea').forEach(autosize);
   let resizeFrame = 0;
@@ -453,10 +765,10 @@
   }
 
   // Don't lose the last few keystrokes when the tab is closed or hidden.
-  window.addEventListener('pagehide', saveNow);
+  window.addEventListener('pagehide', saveTyping);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') saveNow();
+    if (document.visibilityState === 'hidden') saveTyping();
   });
 
-  render();
+  start();
 })();
