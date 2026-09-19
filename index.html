@@ -13,13 +13,45 @@
 </head>
 <body>
 
-  <!-- Shown while the stories load from Firestore, or if they can't be loaded -->
-  <div id="status" class="status" role="status">
+  <!-- Entry screen: a 6-digit code opens the reading part or the writing part.
+       With the reading code it turns into the story picker ("Pick your experience"). -->
+  <main id="gate" class="welcome">
+    <div class="welcome__inner">
+      <p class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.6-2-8-1.6v12.2c3.4-.4 6.2.2 8 1.6 1.8-1.4 4.6-2 8-1.6V5.4c-3.4-.4-6.2.2-8 1.6Z"/><path d="M12 7v12.2"/></svg>
+        </span>
+        Interactive Stories
+      </p>
+
+      <h1 id="gate-title" class="welcome__title" tabindex="-1">Step inside the <em>story</em></h1>
+      <p id="gate-lead" class="welcome__lead">Every story has a door. Enter your 6&#8209;digit code to open it.</p>
+
+      <form id="code-form" class="code" autocomplete="off">
+        <div class="code__field">
+          <input id="code-input" class="code__input" type="text" inputmode="numeric" autocomplete="off"
+                 aria-label="6-digit code" aria-describedby="code-message">
+          <div id="code-cells" class="code__cells" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+        </div>
+        <p id="code-message" class="code__message" aria-live="polite"></p>
+      </form>
+
+      <div id="picker" class="picker" hidden>
+        <p id="picker-status" class="picker__status">Loading stories…</p>
+        <ul id="picker-list" class="picker__list"></ul>
+      </div>
+    </div>
+  </main>
+
+  <!-- Writing part: shown while its stories load from Firestore, or if they can't be loaded -->
+  <div id="status" class="status" role="status" hidden>
     <span class="status__spinner" aria-hidden="true"></span>
     <p id="status-text">Loading your stories…</p>
   </div>
 
-  <!-- Welcome screen: shown while no stories exist yet -->
+  <!-- Writing part, first screen: shown while no stories exist yet -->
   <main id="welcome" class="welcome" hidden>
     <div class="welcome__inner">
       <p class="brand">
@@ -43,7 +75,7 @@
     </div>
   </main>
 
-  <!-- Workspace: story list on the left, chapters on the right -->
+  <!-- Writing part: story list on the left, chapters on the right -->
   <div id="workspace" class="workspace" hidden>
     <aside class="sidebar">
       <p class="brand">
@@ -100,6 +132,28 @@
       </div>
     </main>
   </div>
+
+  <!-- Reading part: one story, start to finish -->
+  <main id="reader" class="reader" hidden>
+    <div id="reader-inner" class="reader__inner">
+      <button id="reader-back" class="reader__back" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+        All stories
+      </button>
+
+      <header class="story-header">
+        <p class="eyebrow">Now reading</p>
+        <h1 id="reader-title" class="story-title" tabindex="-1"></h1>
+        <p id="reader-meta" class="story-meta"></p>
+      </header>
+
+      <div id="reader-chapters"></div>
+
+      <p class="reader__end">
+        <button id="reader-more" class="btn btn--soft" type="button">Pick another story</button>
+      </p>
+    </div>
+  </main>
 
   <!-- Asks before a story is deleted -->
   <dialog id="delete-dialog" class="dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-text">

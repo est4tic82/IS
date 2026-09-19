@@ -35,6 +35,10 @@
   // Which story was open last is a per-device preference, so it stays in this browser.
   const OPEN_STORY_KEY = 'interactive-stories:open-story';
 
+  // The entry codes and the part of the app each one opens. Anyone can read them in this file,
+  // so they only choose a part of the app; Firestore's security rules are what protect the stories.
+  const CODES = { '272610': 'read', '101129': 'write' };
+
   // ---------------------------------------------------------------------------
   // Data
   // ---------------------------------------------------------------------------
@@ -46,6 +50,8 @@
   let firestore = null; // the Firestore SDK functions, once loaded
   let db = null;
   let loaded = false; // whether the first batch of stories has arrived
+  let part = null; // the part of the app the code opened: 'read' or 'write' (null on the entry screen)
+  let readingId = null; // the story open in the reader
 
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const currentStory = () => state.stories.find((story) => story.id === state.selectedId);
@@ -56,6 +62,12 @@
   const plural = (count, word) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
   const chapterCount = (story) =>
     story.chapters.length ? plural(story.chapters.length, 'chapter') : 'No chapters yet';
+
+  /** "3 chapters · 1,204 words" */
+  function storySummary(story) {
+    const words = story.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0);
+    return words ? `${chapterCount(story)} · ${plural(words, 'word')}` : chapterCount(story);
+  }
 
   function readOpenStory() {
     try {
@@ -231,10 +243,12 @@
     if (!loaded) {
       loaded = true;
       if (!currentStory() && state.stories.length) state.selectedId = state.stories[0].id;
-      render();
+      showPart();
       return;
     }
     if (!changed) return; // only this device's own writes, which are already on screen
+    if (part === 'read') renderReadPart();
+    if (part !== 'write') return;
 
     if (!state.stories.length) {
       render(); // every story was deleted elsewhere: back to the welcome screen
@@ -267,6 +281,7 @@
   }
 
   const ICONS = {
+    arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
     pen: '<path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1Z"/><path d="m14 7 3 3"/>',
     trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 12.5h10L18 7M10 11v5M14 11v5"/>',
   };
@@ -320,6 +335,24 @@
   // ---------------------------------------------------------------------------
 
   const ui = {
+    gate: $('gate'),
+    gateInner: $('gate').firstElementChild,
+    gateTitle: $('gate-title'),
+    gateLead: $('gate-lead'),
+    codeForm: $('code-form'),
+    codeInput: $('code-input'),
+    codeCells: $('code-cells'),
+    codeMessage: $('code-message'),
+    picker: $('picker'),
+    pickerStatus: $('picker-status'),
+    pickerList: $('picker-list'),
+    reader: $('reader'),
+    readerInner: $('reader-inner'),
+    readerTitle: $('reader-title'),
+    readerMeta: $('reader-meta'),
+    readerChapters: $('reader-chapters'),
+    readerBack: $('reader-back'),
+    readerMore: $('reader-more'),
     status: $('status'),
     statusText: $('status-text'),
     welcome: $('welcome'),
@@ -364,8 +397,9 @@
     }
   }
 
-  /** Replaces the loading message with an error, when the stories can't be loaded at all. */
+  /** Replaces everything with an error, when the stories can't be loaded at all. */
   function showStatus(message) {
+    for (const screen of [ui.gate, ui.welcome, ui.workspace, ui.reader]) screen.hidden = true;
     ui.status.hidden = false;
     ui.status.classList.add('is-error');
     ui.statusText.textContent = message;
@@ -455,10 +489,7 @@
 
   function updateMeta(story = currentStory()) {
     if (!story) return; // e.g. a late save after the last story was deleted
-    const words = story.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0);
-    ui.storyMeta.textContent = words
-      ? `${chapterCount(story)} · ${plural(words, 'word')}`
-      : chapterCount(story);
+    ui.storyMeta.textContent = storySummary(story);
   }
 
   /** One chapter card: its number, its title (click to rename) and its content. */
@@ -584,6 +615,123 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Entry screen
+  // ---------------------------------------------------------------------------
+
+  /** Fills the six boxes: a dot for each digit typed, and a highlight on the next one. */
+  function updateCodeCells() {
+    const typed = ui.codeInput.value.length;
+    [...ui.codeCells.children].forEach((cell, index) => {
+      cell.classList.toggle('is-filled', index < typed);
+      cell.classList.toggle('is-next', index === Math.min(typed, 5));
+    });
+  }
+
+  function checkCode() {
+    const opens = CODES[ui.codeInput.value];
+    if (opens) {
+      openPart(opens);
+      return;
+    }
+    ui.codeInput.value = '';
+    updateCodeCells();
+    ui.codeCells.classList.add('is-wrong');
+    shake(ui.codeCells);
+    ui.codeMessage.textContent = 'That code didn’t work. Try again.';
+  }
+
+  /** Opens the reading part or the writing part, depending on the code. */
+  function openPart(which) {
+    part = which;
+    if (which === 'read') {
+      showPicker();
+      animateIn(ui.gateInner);
+      ui.gateTitle.focus(); // so screen readers announce "Pick your experience"
+    } else {
+      ui.gate.hidden = true;
+      if (loaded) render();
+      else ui.status.hidden = false; // "Loading your stories…" until they arrive
+    }
+  }
+
+  /** Shows the part that was opened, once the stories have loaded (nothing while the entry screen is up). */
+  function showPart() {
+    if (part === 'read') renderReadPart();
+    else if (part === 'write') render();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reading part
+  // ---------------------------------------------------------------------------
+
+  // Stories worth reading: the ones with at least one chapter.
+  const readableStories = () => state.stories.filter((story) => story.chapters.length > 0);
+
+  /** Turns the entry screen into the story picker: "Pick your experience" and the list of stories. */
+  function showPicker() {
+    readingId = null;
+    document.title = APP_NAME;
+    ui.reader.hidden = true;
+    ui.gate.hidden = false;
+    ui.gateTitle.replaceChildren('Pick your ', h('em', {}, 'experience'));
+    ui.gateLead.textContent = 'Choose a story and start reading.';
+    ui.codeForm.hidden = true;
+    ui.picker.hidden = false;
+    renderPicker();
+  }
+
+  function renderPicker() {
+    const stories = readableStories();
+    ui.pickerList.replaceChildren(...stories.map((story) =>
+      h('li', {},
+        h('button', { class: 'picker__item', type: 'button', 'data-id': story.id, onclick: () => openReader(story.id) },
+          h('span', { class: 'picker__text' },
+            h('span', { class: 'picker__name' }, story.name),
+            h('span', { class: 'picker__meta' }, storySummary(story))),
+          icon('arrow')))));
+    ui.pickerStatus.textContent = loaded ? 'There are no stories to read yet.' : 'Loading stories…';
+    ui.pickerStatus.hidden = loaded && stories.length > 0;
+  }
+
+  function openReader(id) {
+    readingId = id;
+    renderReader();
+    window.scrollTo(0, 0);
+    animateIn(ui.readerInner);
+    ui.readerTitle.focus();
+  }
+
+  function renderReader() {
+    const story = state.stories.find((candidate) => candidate.id === readingId);
+    document.title = `${story.name} · ${APP_NAME}`;
+    ui.gate.hidden = true;
+    ui.reader.hidden = false;
+    ui.readerTitle.textContent = story.name;
+    ui.readerMeta.textContent = storySummary(story);
+    ui.readerChapters.replaceChildren(...story.chapters.map((chapter, index) =>
+      h('section', { class: 'reader__chapter' },
+        h('p', { class: 'chapter__label' }, `Chapter ${index + 1}`),
+        h('h2', { class: 'reader__chapter-title' }, chapter.title),
+        chapter.content.trim()
+          ? h('div', { class: 'reader__text' }, chapter.content)
+          : h('p', { class: 'reader__empty' }, 'This chapter has no text yet.'))));
+  }
+
+  /** Back from a story to the list, with focus on the story just read. */
+  function closeReader() {
+    const id = readingId;
+    showPicker();
+    window.scrollTo(0, 0);
+    ui.pickerList.querySelector(`[data-id="${id}"]`)?.focus();
+  }
+
+  /** Keeps the reading part current when stories change, here or on another device. */
+  function renderReadPart() {
+    if (readableStories().some((story) => story.id === readingId)) renderReader();
+    else showPicker(); // nothing open, or the open story was deleted
+  }
+
+  // ---------------------------------------------------------------------------
   // Actions
   // ---------------------------------------------------------------------------
 
@@ -686,7 +834,31 @@
   // Events
   // ---------------------------------------------------------------------------
 
-  // Welcome screen: "Create your big story"
+  // Entry screen: the 6-digit code is checked as soon as the last digit is typed.
+  ui.codeInput.addEventListener('input', () => {
+    ui.codeInput.value = ui.codeInput.value.replace(/\D/g, '').slice(0, 6);
+    ui.codeCells.classList.remove('is-wrong');
+    ui.codeMessage.textContent = '';
+    updateCodeCells();
+    if (ui.codeInput.value.length === 6) checkCode();
+  });
+
+  ui.codeForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (ui.codeInput.value.length === 6) checkCode();
+    else ui.codeMessage.textContent = 'Enter all 6 digits.';
+  });
+
+  // The digits are hidden behind dots, so new ones always go at the end.
+  const caretToEnd = () => ui.codeInput.setSelectionRange(6, 6);
+  ui.codeInput.addEventListener('focus', caretToEnd);
+  ui.codeInput.addEventListener('click', caretToEnd);
+
+  // Reading part
+  ui.readerBack.addEventListener('click', closeReader);
+  ui.readerMore.addEventListener('click', closeReader);
+
+  // Writing part, first screen: "Create your big story"
   ui.welcomeInput.addEventListener('input', () => {
     ui.welcomeSubmit.disabled = !ui.welcomeInput.value.trim();
   });
@@ -770,5 +942,8 @@
     if (document.visibilityState === 'hidden') saveTyping();
   });
 
+  // The entry screen shows first; the stories load in the background meanwhile.
+  updateCodeCells();
+  ui.codeInput.focus();
   start();
 })();
