@@ -142,7 +142,6 @@
       </button>
 
       <header class="story-header">
-        <p class="eyebrow">Now reading</p>
         <h1 id="reader-title" class="story-title" tabindex="-1"></h1>
         <p id="reader-meta" class="story-meta"></p>
       </header>
@@ -154,6 +153,12 @@
       </p>
     </div>
   </main>
+
+  <!-- Top-right corner of every screen once a code has been entered: back to the entry page -->
+  <button id="logout" class="logout" type="button" hidden>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4"/><path d="M15 16l4-4-4-4"/><path d="M19 12H9"/></svg>
+    Log out
+  </button>
 
   <!-- Asks before a story is deleted -->
   <dialog id="delete-dialog" class="dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-text">

@@ -210,6 +210,35 @@ button {
   background: var(--danger-hover);
 }
 
+/* Small outlined buttons: "All stories" in the reader and "Log out" */
+.reader__back,
+.logout {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 8px 10px;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.reader__back:hover,
+.logout:hover {
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+/* Sits in the top-right corner of every screen once a code has been entered. */
+.logout {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 5;
+}
+
 .shake {
   animation: shake 0.35s ease;
 }
@@ -439,22 +468,7 @@ button {
 }
 
 .reader__back {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
   margin-bottom: 40px;
-  padding: 8px 14px 8px 10px;
-  font-weight: 500;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  transition: color 0.15s ease, border-color 0.15s ease;
-}
-
-.reader__back:hover {
-  color: var(--accent-text);
-  border-color: var(--accent);
 }
 
 .reader__chapter + .reader__chapter {
@@ -476,7 +490,7 @@ button {
   font-size: 1.2rem;
   line-height: 1.8;
   color: var(--ink-soft);
-  white-space: pre-wrap; /* keeps the writer's line breaks */
+  white-space: pre-wrap; /* shows the text exactly as it was written */
   overflow-wrap: anywhere;
 }
 
@@ -1158,6 +1172,11 @@ button {
 
   .reader {
     padding: 24px 16px 80px;
+  }
+
+  .logout {
+    top: 20px;
+    right: 16px;
   }
 
   .reader__chapter-title {

@@ -376,6 +376,13 @@
     notice: $('notice'),
     noticeText: $('notice-text'),
     noticeClose: $('notice-close'),
+    logout: $('logout'),
+  };
+
+  // The entry screen's own heading and text, to put back after the story picker replaced them.
+  const gateIntro = {
+    title: [...ui.gateTitle.childNodes].map((node) => node.cloneNode(true)),
+    lead: ui.gateLead.textContent,
   };
 
   // The <li> of a chapter whose title is being typed but hasn't been saved yet.
@@ -643,6 +650,7 @@
   /** Opens the reading part or the writing part, depending on the code. */
   function openPart(which) {
     part = which;
+    ui.logout.hidden = false;
     if (which === 'read') {
       showPicker();
       animateIn(ui.gateInner);
@@ -652,6 +660,29 @@
       if (loaded) render();
       else ui.status.hidden = false; // "Loading your stories…" until they arrive
     }
+  }
+
+  /** Leaves the reading part or the writing part and shows the entry screen, which asks for a code again. */
+  function logOut() {
+    saveTyping(); // send any chapter text still waiting to be saved
+    const gateWasShowing = !ui.gate.hidden; // the story picker lives on the entry screen
+    part = null;
+    readingId = null;
+    closeNewStoryForm();
+    for (const screen of [ui.welcome, ui.workspace, ui.reader, ui.status, ui.picker, ui.logout]) screen.hidden = true;
+
+    ui.gateTitle.replaceChildren(...gateIntro.title.map((node) => node.cloneNode(true)));
+    ui.gateLead.textContent = gateIntro.lead;
+    ui.codeForm.reset();
+    ui.codeForm.hidden = false;
+    ui.codeCells.classList.remove('is-wrong');
+    ui.codeMessage.textContent = '';
+    updateCodeCells();
+    ui.gate.hidden = false;
+    document.title = APP_NAME;
+    window.scrollTo(0, 0);
+    if (gateWasShowing) animateIn(ui.gateInner); // otherwise its entrance animation replays by itself
+    ui.codeInput.focus();
   }
 
   /** Shows the part that was opened, once the stories have loaded (nothing while the entry screen is up). */
@@ -708,9 +739,8 @@
     ui.reader.hidden = false;
     ui.readerTitle.textContent = story.name;
     ui.readerMeta.textContent = storySummary(story);
-    ui.readerChapters.replaceChildren(...story.chapters.map((chapter, index) =>
+    ui.readerChapters.replaceChildren(...story.chapters.map((chapter) =>
       h('section', { class: 'reader__chapter' },
-        h('p', { class: 'chapter__label' }, `Chapter ${index + 1}`),
         h('h2', { class: 'reader__chapter-title' }, chapter.title),
         chapter.content.trim()
           ? h('div', { class: 'reader__text' }, chapter.content)
@@ -853,6 +883,8 @@
   const caretToEnd = () => ui.codeInput.setSelectionRange(6, 6);
   ui.codeInput.addEventListener('focus', caretToEnd);
   ui.codeInput.addEventListener('click', caretToEnd);
+
+  ui.logout.addEventListener('click', logOut);
 
   // Reading part
   ui.readerBack.addEventListener('click', closeReader);
