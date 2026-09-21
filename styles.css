@@ -462,8 +462,9 @@ button {
   padding: 40px 24px 120px;
 }
 
+/* The same width as a chapter card's text in the writing part, so both wrap the rows identically. */
 .reader__inner {
-  max-width: 680px;
+  max-width: 656px;
   margin: 0 auto;
 }
 
@@ -487,8 +488,8 @@ button {
 
 .reader__text {
   font-family: var(--font-display);
-  font-size: 1.2rem;
-  line-height: 1.8;
+  font-size: 1.125rem;
+  line-height: 1.75;
   color: var(--ink-soft);
   white-space: pre-wrap; /* shows the text exactly as it was written */
   overflow-wrap: anywhere;
@@ -732,15 +733,6 @@ button {
   border-bottom: 1px solid var(--line);
 }
 
-.eyebrow {
-  margin-bottom: 12px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent-text);
-}
-
 .story-title {
   margin-bottom: 12px;
   font-family: var(--font-display);
@@ -836,16 +828,6 @@ button {
   border: 1.5px dashed var(--accent);
 }
 
-.chapter__label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent-text);
-}
-
 /* The title and its edit field share one box so switching between them doesn't move anything. */
 .chapter__title,
 .chapter__title-input {
@@ -903,6 +885,7 @@ button {
 }
 
 .chapter__body {
+  position: relative; /* the widget dots are laid over the text box */
   margin-top: 18px;
 }
 
@@ -910,14 +893,13 @@ button {
   display: block;
   width: 100%;
   margin: 0;
-  padding: 18px 0 0;
+  padding: 0;
   font-family: var(--font-display);
   font-size: 1.125rem;
   line-height: 1.75;
   color: var(--ink-soft);
   background: transparent;
   border: 0;
-  border-top: 1px solid var(--line);
   border-radius: 0;
   outline: none;
   resize: none;
@@ -949,6 +931,530 @@ button {
   color: var(--accent-text);
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent-soft) 50%, transparent);
+}
+
+/* Widgets in the writing part
+   ========================================================================== */
+
+/* A button that reads as a link, for the report in the story's meta line */
+.link-btn {
+  padding: 0;
+  font: inherit;
+  color: var(--accent-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  background: none;
+  border: 0;
+}
+
+.link-btn:hover {
+  color: var(--accent);
+}
+
+.chapter__widgets {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.widget-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.widget-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.widget-row__open {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 14px;
+  text-align: left;
+  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: border-color 0.15s ease;
+}
+
+.widget-row__open:hover {
+  border-color: var(--accent);
+}
+
+.widget-row__question {
+  font-size: 0.95rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.widget-row__where {
+  overflow: hidden;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.widget-row__remove {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+}
+
+.widget-row__remove:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.widget-row__remove .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.chapter__widgets:empty {
+  display: none;
+}
+
+/* The floating button that starts a widget, and the bar shown while a line is being picked */
+.fab {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 22px 14px 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: 0;
+  border-radius: 999px;
+  box-shadow: 0 14px 30px -12px rgb(0 0 0 / 0.5);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.fab:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.pick-bar {
+  position: fixed;
+  right: 0;
+  bottom: 28px;
+  left: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: fit-content;
+  max-width: calc(100vw - 32px);
+  margin: 0 auto;
+  padding: 12px 12px 12px 20px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  box-shadow: 0 14px 30px -12px rgb(0 0 0 / 0.4);
+  animation: rise 0.25s ease;
+}
+
+/* The chapter's text, set exactly as the editing box and the reader set it, so rows line up everywhere */
+.chapter__preview {
+  position: relative; /* the row highlight sits inside, behind the words */
+  isolation: isolate; /* ...and stays above the card behind it */
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  cursor: pointer;
+}
+
+/* A copy of the chapter's text, set exactly as the text box sets it and hidden, so that the widget
+   dots riding on it stay level with their own line while the chapter is being written. */
+.chapter__dots {
+  position: absolute;
+  inset: 0 0 auto 0;
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* A widget's spot: a dot that takes no space in the text */
+.chapter__mark {
+  position: relative;
+}
+
+.chapter__dots .chapter__mark {
+  visibility: visible;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* Sits out in the card's margin, level with the row the widget fires on. */
+.chapter__mark::after {
+  content: "";
+  position: absolute;
+  top: 0.45em;
+  left: -22px;
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border-radius: 50%;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chapter__dots .chapter__mark:hover::after {
+  transform: scale(1.5);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.reader__mark {
+  position: relative;
+}
+
+/* Follows the pointer over the row it is on. A negative z-index keeps it under the text. */
+.row-highlight {
+  position: absolute;
+  z-index: -1;
+  background: var(--accent-soft);
+  border-radius: 6px;
+  pointer-events: none;
+  transition: top 0.08s ease, left 0.08s ease, width 0.08s ease, height 0.08s ease;
+}
+
+/* A line that already has a widget can't take another one. */
+.row-highlight--taken {
+  background: var(--line);
+}
+
+.chapter__preview.is-taken {
+  cursor: not-allowed;
+}
+
+/* The widget form
+   ========================================================================== */
+
+.dialog--wide {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.field {
+  display: block;
+  margin: 0 0 22px;
+  padding: 0;
+  border: 0;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 8px;
+  padding: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.field__hint {
+  margin: -4px 0 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.field__input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  outline: none;
+}
+
+.field__input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.widget-where {
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  background: var(--accent-soft);
+  border-radius: 12px;
+}
+
+.btn--small {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+}
+
+.labels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+}
+
+.labels__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.labels__number {
+  flex: none;
+  width: 22px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: right;
+}
+
+.dialog__error {
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+  color: var(--danger-text);
+}
+
+/* The popup readers see
+   ========================================================================== */
+
+.widget-popup__label {
+  margin-top: 10px;
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  color: var(--accent-text);
+}
+
+.scale {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 22px;
+}
+
+.scale__number {
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.scale__number:hover {
+  border-color: var(--accent);
+}
+
+.scale__number.is-picked {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* The reading report
+   ========================================================================== */
+
+.report__summary {
+  margin-bottom: 28px;
+  color: var(--muted);
+}
+
+.report__reading {
+  margin-bottom: 20px;
+  padding: 24px 28px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
+}
+
+.report__heading {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.report__reading .report__heading {
+  font-size: 1.15rem;
+}
+
+.report__line {
+  margin-top: 10px;
+  color: var(--ink-soft);
+}
+
+.report__empty {
+  color: var(--muted);
+}
+
+/* The list of sessions */
+.report__session-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.report__session-list li {
+  position: relative; /* the delete button sits over the right end of the card */
+}
+
+.report__session {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 16px 54px 16px 20px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.report__session:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.report__session .icon {
+  color: var(--accent);
+}
+
+/* Throws away one reading report, from its row in the list */
+.report__session-remove {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.report__session-list li:hover .report__session-remove,
+.report__session-remove:focus-visible {
+  opacity: 1;
+}
+
+.report__session-remove:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* ...and the same from inside the report itself */
+.report__foot {
+  margin-top: 28px;
+}
+
+.report__delete:hover {
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.report__when {
+  flex: none;
+  width: 150px;
+  font-weight: 500;
+}
+
+.report__answers {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* One session: what was answered where */
+.report__answer-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.report__answer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.report__answer-text {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.report__question {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.report__chapter {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.report__value {
+  flex: none;
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+.report__value--none {
+  font-weight: 500;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
 }
 
 /* Loading and errors
@@ -1181,6 +1687,40 @@ button {
 
   .reader__chapter-title {
     font-size: 1.6rem;
+  }
+
+  .labels {
+    grid-template-columns: 1fr;
+  }
+
+  .fab {
+    right: 16px;
+    bottom: 16px;
+  }
+
+  .pick-bar {
+    bottom: 16px;
+    padding-left: 16px;
+    font-size: 0.9rem;
+  }
+
+  .scale {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .report__question,
+  .report__reading,
+  .report__sessions {
+    padding: 20px;
+  }
+
+  .report__session {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .report__when {
+    width: auto;
   }
 }
 

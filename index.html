@@ -108,10 +108,22 @@
     <main class="editor">
       <div id="editor-inner" class="editor__inner">
         <header class="story-header">
-          <p class="eyebrow">Your story</p>
           <h1 id="story-title" class="story-title"></h1>
-          <p id="story-meta" class="story-meta"></p>
+          <p class="story-meta">
+            <button id="report-btn" class="link-btn" type="button">Reading reports</button>
+            <span aria-hidden="true"> · </span>
+            <span id="story-meta"></span>
+          </p>
         </header>
+
+        <!-- What readers answered in the widgets, for the story above -->
+        <section id="report" class="report" hidden>
+          <button id="report-back" class="reader__back" type="button">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+            Back to writing
+          </button>
+          <div id="report-body"></div>
+        </section>
 
         <button id="first-chapter-btn" class="first-chapter" type="button" aria-label="Add your first chapter" hidden>
           <span class="first-chapter__icon" aria-hidden="true">
@@ -160,14 +172,74 @@
     Log out
   </button>
 
-  <!-- Asks before a story is deleted -->
+  <!-- Starts a widget: the writer then clicks the line it should appear on -->
+  <button id="add-widget-fab" class="fab" type="button" hidden>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    Add a widget
+  </button>
+
+  <!-- Shown while the writer is choosing that line -->
+  <div id="pick-bar" class="pick-bar" role="status" hidden>
+    <p>Click the line where the widget should appear.</p>
+    <button id="pick-cancel" class="btn btn--ghost btn--small" type="button">Cancel</button>
+  </div>
+
+  <!-- Follows the pointer across the rendered rows while a line is being picked -->
+  <div id="row-highlight" class="row-highlight" aria-hidden="true" hidden></div>
+
+  <!-- Adding or editing a widget that pops up at a chosen line of a chapter -->
+  <dialog id="widget-dialog" class="dialog dialog--wide" aria-labelledby="widget-dialog-title">
+    <form id="widget-form" method="dialog" class="dialog__body">
+      <h2 id="widget-dialog-title" class="dialog__title">Add a widget</h2>
+
+      <label class="field">
+        <span class="field__label">Question</span>
+        <input id="widget-question" class="field__input" type="text" maxlength="200" placeholder="How does this make you feel?" autocomplete="off">
+      </label>
+
+      <div class="field">
+        <span class="field__label">Where it appears</span>
+        <p class="field__hint">The popup opens when this line reaches a third of the way down the reader's screen.</p>
+        <p id="widget-where" class="widget-where"></p>
+        <button id="widget-change-line" class="btn btn--ghost btn--small" type="button">Pick another line</button>
+      </div>
+
+      <fieldset class="field">
+        <legend class="field__label">Labels for 1 to 10</legend>
+        <p class="field__hint">Shown under the question once the reader picks that number.</p>
+        <div id="widget-labels" class="labels"></div>
+      </fieldset>
+
+      <p id="widget-error" class="dialog__error" aria-live="polite"></p>
+
+      <div class="dialog__actions">
+        <button id="widget-delete" class="btn btn--ghost" type="button" hidden>Delete widget</button>
+        <button class="btn btn--ghost" value="cancel">Cancel</button>
+        <button class="btn btn--primary" value="save">Save widget</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- A widget popping up while reading -->
+  <dialog id="widget-popup" class="dialog" aria-labelledby="widget-popup-question">
+    <div class="dialog__body">
+      <h2 id="widget-popup-question" class="dialog__title"></h2>
+      <p id="widget-popup-label" class="widget-popup__label" aria-live="polite" hidden></p>
+      <div id="widget-popup-scale" class="scale" role="group" aria-label="Pick a number from 1 to 10"></div>
+      <div class="dialog__actions">
+        <button id="widget-popup-close" class="btn btn--primary" type="button">Continue reading</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Asks before a story or a reading report is deleted -->
   <dialog id="delete-dialog" class="dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-text">
     <form method="dialog" class="dialog__body">
       <h2 id="delete-dialog-title" class="dialog__title"></h2>
       <p id="delete-dialog-text" class="dialog__text"></p>
       <div class="dialog__actions">
         <button class="btn btn--ghost" value="cancel" autofocus>Cancel</button>
-        <button class="btn btn--danger" value="delete">Delete story</button>
+        <button id="delete-dialog-confirm" class="btn btn--danger" value="delete">Delete story</button>
       </div>
     </form>
   </dialog>
