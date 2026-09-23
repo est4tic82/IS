@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Inter:wght@400..700&display=swap">
   <link rel="stylesheet" href="styles.css">
+  <script src="firestore-rest.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -49,6 +50,10 @@
   <div id="status" class="status" role="status" hidden>
     <span class="status__spinner" aria-hidden="true"></span>
     <p id="status-text">Loading your stories…</p>
+    <!-- Shown only when a connection saved on this device is the thing that failed -->
+    <button id="status-reset" class="btn btn--soft btn--small" type="button" hidden>
+      Use the built-in connection
+    </button>
   </div>
 
   <!-- Writing part, first screen: shown while no stories exist yet -->
@@ -103,11 +108,29 @@
       </form>
 
       <p class="sidebar__note">Your stories are saved online and sync across devices.</p>
+
+      <!-- Stories put aside: out of the list, out of the reader's way -->
+      <button id="more-stories-btn" class="manage-db" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8h18v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M5 8V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/><path d="M10 13h4"/></svg>
+        More stories
+      </button>
+
+      <!-- Every widget in every story, as a reader meets them -->
+      <button id="gallery-btn" class="manage-db" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="15" width="7" height="5" rx="1.5"/><rect x="14" y="15" width="7" height="5" rx="1.5"/></svg>
+        Widget gallery
+      </button>
+
+      <!-- Shows what is actually stored in Firestore, and can empty it. -->
+      <button id="manage-db-btn" class="manage-db" type="button">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="3"/><path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/><path d="M4.5 11.5v7c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-7"/></svg>
+        Manage database
+      </button>
     </aside>
 
     <main class="editor">
       <div id="editor-inner" class="editor__inner">
-        <header class="story-header">
+        <header id="story-header" class="story-header">
           <h1 id="story-title" class="story-title"></h1>
           <p class="story-meta">
             <button id="report-btn" class="link-btn" type="button">Reading reports</button>
@@ -125,6 +148,22 @@
           <div id="report-body"></div>
         </section>
 
+        <!-- The stories put aside, and the way back for each of them -->
+        <section id="more-stories" class="report" tabindex="-1" hidden>
+          <div id="more-stories-body"></div>
+        </section>
+
+        <!-- Every widget in the library, shown the way the reader meets it -->
+        <section id="gallery" class="report" tabindex="-1" hidden>
+          <div id="gallery-body"></div>
+        </section>
+
+        <!-- Everything Firestore is actually holding, read straight from it. No way back from here:
+             picking a story in the sidebar is what returns to writing. -->
+        <section id="database" class="report" tabindex="-1" hidden>
+          <div id="database-body"></div>
+        </section>
+
         <button id="first-chapter-btn" class="first-chapter" type="button" aria-label="Add your first chapter" hidden>
           <span class="first-chapter__icon" aria-hidden="true">
             <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
@@ -134,6 +173,9 @@
             <span class="first-chapter__sub">Start by giving it a title</span>
           </span>
         </button>
+
+        <!-- Shown when there is a library but nothing in it is on show -->
+        <div id="no-story" class="no-story" hidden></div>
 
         <ol id="chapter-list" class="chapter-list"></ol>
 
@@ -173,29 +215,76 @@
   </button>
 
   <!-- Starts a widget: the writer then clicks the line it should appear on -->
-  <button id="add-widget-fab" class="fab" type="button" hidden>
-    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-    Add a widget
-  </button>
-
-  <!-- Shown while the writer is choosing that line -->
-  <div id="pick-bar" class="pick-bar" role="status" hidden>
-    <p>Click the line where the widget should appear.</p>
-    <button id="pick-cancel" class="btn btn--ghost btn--small" type="button">Cancel</button>
+  <div class="fab-stack">
+    <!-- One slot: the button, or the prompt and Cancel that stand in for it while picking -->
+    <div class="fab-slot">
+      <button id="add-widget-fab" class="fab" type="button" hidden>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        Add a widget
+      </button>
+      <div id="pick-bar" class="pick-bar" role="status" hidden>
+        <p class="pick-bar__hint">Click the line where the widget should appear.</p>
+        <button id="pick-cancel" class="fab fab--quiet" type="button">Cancel</button>
+      </div>
+    </div>
+    <button id="widget-count-fab" class="fab fab--quiet" type="button" hidden>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      <span id="widget-count"></span>
+    </button>
   </div>
+
+  <!-- Every widget in the open story, to find or remove -->
+  <aside id="widget-drawer" class="drawer" aria-labelledby="widget-drawer-title" hidden>
+    <header class="drawer__head">
+      <h2 id="widget-drawer-title" class="drawer__title">Widgets</h2>
+      <button id="widget-drawer-clear" class="drawer__clear" type="button">Remove all</button>
+      <button id="widget-drawer-close" class="drawer__close" type="button" aria-label="Close">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </header>
+    <div id="widget-drawer-body" class="drawer__body"></div>
+  </aside>
 
   <!-- Follows the pointer across the rendered rows while a line is being picked -->
   <div id="row-highlight" class="row-highlight" aria-hidden="true" hidden></div>
+
+  <!-- Which kind of widget to add, asked before the form -->
+  <dialog id="kind-dialog" class="dialog" aria-labelledby="kind-dialog-title">
+    <div class="dialog__body">
+      <h2 id="kind-dialog-title" class="dialog__title">What kind of widget?</h2>
+      <div id="kind-choices" class="choices"></div>
+      <div class="dialog__actions">
+        <button id="kind-cancel" class="btn btn--ghost" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
 
   <!-- Adding or editing a widget that pops up at a chosen line of a chapter -->
   <dialog id="widget-dialog" class="dialog dialog--wide" aria-labelledby="widget-dialog-title">
     <form id="widget-form" method="dialog" class="dialog__body">
       <h2 id="widget-dialog-title" class="dialog__title">Add a widget</h2>
 
-      <label class="field">
-        <span class="field__label">Question</span>
-        <input id="widget-question" class="field__input" type="text" maxlength="200" placeholder="How does this make you feel?" autocomplete="off">
-      </label>
+      <div id="widget-scale-fields">
+        <label class="field">
+          <span class="field__label">Question</span>
+          <input id="widget-question" class="field__input" type="text" maxlength="200" placeholder="How does this make you feel?" autocomplete="off">
+        </label>
+      </div>
+
+      <div id="widget-image-fields" hidden>
+        <div class="field">
+          <span class="field__label">Picture</span>
+          <p class="field__hint">Anything larger than 1400px is shrunk so it fits. Nothing leaves your Firebase project.</p>
+          <input id="widget-image-file" class="field__input" type="file" accept="image/*">
+          <div id="widget-image-preview" class="image-preview" hidden></div>
+        </div>
+
+        <label class="field">
+          <span class="field__label">Caption</span>
+          <p class="field__hint">Shown under the picture, and read out to anyone who can't see it.</p>
+          <input id="widget-image-alt" class="field__input" type="text" maxlength="200" placeholder="The hills on the way back" autocomplete="off">
+        </label>
+      </div>
 
       <div class="field">
         <span class="field__label">Where it appears</span>
@@ -204,9 +293,9 @@
         <button id="widget-change-line" class="btn btn--ghost btn--small" type="button">Pick another line</button>
       </div>
 
-      <fieldset class="field">
+      <fieldset id="widget-labels-field" class="field">
         <legend class="field__label">Labels for 1 to 10</legend>
-        <p class="field__hint">Shown under the question once the reader picks that number.</p>
+        <p class="field__hint">Shown under the question once the slider rests on that number.</p>
         <div id="widget-labels" class="labels"></div>
       </fieldset>
 
@@ -224,15 +313,17 @@
   <dialog id="widget-popup" class="dialog" aria-labelledby="widget-popup-question">
     <div class="dialog__body">
       <h2 id="widget-popup-question" class="dialog__title"></h2>
-      <p id="widget-popup-label" class="widget-popup__label" aria-live="polite" hidden></p>
-      <div id="widget-popup-scale" class="scale" role="group" aria-label="Pick a number from 1 to 10"></div>
-      <div class="dialog__actions">
+      <!-- The slider, its readout and its end marks are built in script, so the gallery can show
+           the very same thing without a second copy of the markup. -->
+      <div id="widget-popup-scale"></div>
+      <!-- Hidden until the reader takes hold of the slider -->
+      <div id="widget-popup-actions" class="dialog__actions widget-actions" hidden>
         <button id="widget-popup-close" class="btn btn--primary" type="button">Continue reading</button>
       </div>
     </div>
   </dialog>
 
-  <!-- Asks before a story or a reading report is deleted -->
+  <!-- Asks before something that can't be undone: deleting a story or a report, merging reports -->
   <dialog id="delete-dialog" class="dialog" aria-labelledby="delete-dialog-title" aria-describedby="delete-dialog-text">
     <form method="dialog" class="dialog__body">
       <h2 id="delete-dialog-title" class="dialog__title"></h2>

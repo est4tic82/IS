@@ -29,11 +29,10 @@
     appId: '1:346183277708:web:68a38b15874fe2059e2fa9',
   };
 
-  // The Firebase SDK is loaded straight from Google's CDN, so there's no npm install or build step.
-  const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/12.19.0';
-
   // Which story was open last is a per-device preference, so it stays in this browser.
   const OPEN_STORY_KEY = 'interactive-stories:open-story';
+  // …and so is which part was open, so a reload doesn't ask for the code again.
+  const OPEN_PART_KEY = 'interactive-stories:open-part';
 
   // The entry codes and the part of the app each one opens. Anyone can read them in this file,
   // so they only choose a part of the app; Firestore's security rules are what protect the stories.
@@ -47,7 +46,9 @@
   // Firestore listener. Changes show up here at once and are written to Firestore in the background.
   const state = { stories: [], selectedId: readOpenStory() };
 
-  let firestore = null; // the Firestore SDK functions, once loaded
+  let firestore = null; // the Firestore client, once connected
+  let activeConfig = null; // the Firebase project being talked to
+  let storiesWatch = null; // stops the story listener when the project changes
   let db = null;
   let loaded = false; // whether the first batch of stories has arrived
   let part = null; // the part of the app the code opened: 'read' or 'write' (null on the entry screen)
@@ -55,11 +56,18 @@
 
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const currentStory = () => state.stories.find((story) => story.id === state.selectedId);
+  // Stories on show in the sidebar, and the ones put aside under "More stories".
+  const openStories = () => state.stories.filter((story) => !story.hidden);
+  const putAside = () => state.stories.filter((story) => story.hidden);
   const byCreation = (a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1);
   const storyRef = (id) => firestore.doc(db, 'stories', id);
 
   const countWords = (text) => (text.match(/\S+/g) || []).length;
-  const plural = (count, word) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
+  /** "1 story", "2 stories", "3 widgets" — a -y ending takes -ies unless a vowel comes before it. */
+  const plural = (count, word) => {
+    const many = /[^aeiou]y$/.test(word) ? `${word.slice(0, -1)}ies` : `${word}s`;
+    return `${count.toLocaleString()} ${count === 1 ? word : many}`;
+  };
   const chapterCount = (story) =>
     story.chapters.length ? plural(story.chapters.length, 'chapter') : 'No chapters yet';
 
@@ -136,10 +144,31 @@
     }
   }
 
+  /** The part left open last time, so a reload doesn't send the writer back to the code screen. */
+  function readOpenPart() {
+    try {
+      const saved = localStorage.getItem(OPEN_PART_KEY);
+      return saved === 'read' || saved === 'write' ? saved : null;
+    } catch (error) {
+      return null; // storage is blocked: the code screen comes up as before
+    }
+  }
+
+  function rememberOpenPart() {
+    try {
+      if (part) localStorage.setItem(OPEN_PART_KEY, part);
+      else localStorage.removeItem(OPEN_PART_KEY);
+    } catch (error) {
+      // Not remembering it just means typing the code again.
+    }
+  }
+
   /** The open story is the one remembered from last time, or the first one if that is gone. */
   function ensureSelection() {
-    if (currentStory()) return;
-    state.selectedId = state.stories.length ? state.stories[0].id : null;
+    const open = currentStory();
+    if (open && !open.hidden) return;
+    const shown = openStories();
+    state.selectedId = shown.length ? shown[0].id : null;
     rememberOpenStory();
   }
 
@@ -147,12 +176,12 @@
 
   /** Firestore applies a write locally straight away; if the server rejects it, say so. */
   function save(write) {
-    write.catch((error) => showNotice(`Couldn’t save your changes. ${explain(error)}`));
+    write.catch((error) => showNotice(`Couldn’t save your changes. ${explain(error)}`, { keep: true }));
   }
 
   function createStory(name) {
     const ref = firestore.doc(firestore.collection(db, 'stories')); // a new id, generated locally
-    const story = { id: ref.id, name, createdAt: Date.now(), chapters: [] };
+    const story = { id: ref.id, name, createdAt: Date.now(), hidden: false, chapters: [] };
     state.stories.push(story);
     save(firestore.setDoc(ref, { name, createdAt: story.createdAt, chapters: {} }));
     return story;
@@ -168,6 +197,17 @@
       createdAt: chapter.createdAt,
     }));
     return chapter;
+  }
+
+  /** Puts a story aside, or brings it back. Aside means out of the sidebar; readers still get it. */
+  function setStoryHidden(story, hidden) {
+    story.hidden = hidden;
+    save(firestore.updateDoc(storyRef(story.id), { hidden }));
+  }
+
+  function renameStory(story, name) {
+    story.name = name;
+    save(firestore.updateDoc(storyRef(story.id), { name }));
   }
 
   function renameChapter(story, chapter, title) {
@@ -186,6 +226,7 @@
   }
 
   function removeWidget(story, chapter, widget) {
+    if (widget.type === 'image' && widget.imageId) forgetImage(widget.imageId);
     chapter.widgets = chapter.widgets.filter((candidate) => candidate.id !== widget.id);
     save(firestore.updateDoc(
       storyRef(story.id),
@@ -193,6 +234,81 @@
       firestore.deleteField()
     ));
   }
+
+  // --- Pictures ----------------------------------------------------------------
+  //
+  // A picture lives in its own document, not on the story, so the four-second poll that watches the
+  // stories never has to carry it. A widget keeps only the id, and the picture is fetched when it
+  // is about to be shown.
+
+  const IMAGE_MAX_SIDE = 1400;
+  const IMAGE_MAX_BYTES = 700 * 1024; // a Firestore document has to stay under a megabyte
+
+  const readDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('That file couldn’t be read.'));
+    reader.readAsDataURL(file);
+  });
+
+  /**
+   * A picked file, ready to store. One that already fits is kept exactly as it is, so a small PNG
+   * keeps its transparency; anything larger is redrawn smaller until it fits.
+   */
+  async function prepareImage(file) {
+    if (!file.type.startsWith('image/')) throw new Error('That file isn’t a picture.');
+
+    const original = await readDataUrl(file);
+    const bitmap = await createImageBitmap(file).catch(() => null);
+    const side = bitmap ? Math.max(bitmap.width, bitmap.height) : 0;
+
+    if (original.length <= IMAGE_MAX_BYTES && side <= IMAGE_MAX_SIDE) {
+      return { data: original, width: bitmap ? bitmap.width : 0, height: bitmap ? bitmap.height : 0, shrunk: false };
+    }
+    if (!bitmap) throw new Error('That picture is too big, and this browser couldn’t resize it.');
+
+    for (const [limit, quality] of [[IMAGE_MAX_SIDE, 0.85], [1100, 0.75], [800, 0.65], [600, 0.55]]) {
+      const scale = Math.min(1, limit / Math.max(bitmap.width, bitmap.height));
+      const canvas = h('canvas', {});
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const data = canvas.toDataURL('image/jpeg', quality);
+      if (data.length <= IMAGE_MAX_BYTES) {
+        return { data, width: canvas.width, height: canvas.height, shrunk: true };
+      }
+    }
+    throw new Error('That picture is too big even after shrinking. Try a smaller one.');
+  }
+
+  async function storeImage(picture, name) {
+    const ref = firestore.doc(firestore.collection(db, 'images'));
+    await firestore.setDoc(ref, {
+      data: picture.data,
+      name: String(name || ''),
+      width: picture.width,
+      height: picture.height,
+      createdAt: Date.now(),
+    });
+    return ref.id;
+  }
+
+  const imagesSeen = new Map(); // id → data url, so a picture is fetched once per visit
+
+  async function loadImage(id) {
+    if (!id) return null;
+    if (imagesSeen.has(id)) return imagesSeen.get(id);
+    const snapshot = await firestore.getDoc(firestore.doc(db, 'images', id));
+    const data = snapshot.exists() ? String(snapshot.data().data || '') : null;
+    imagesSeen.set(id, data);
+    return data;
+  }
+
+  const forgetImage = (id) => {
+    if (!id) return;
+    imagesSeen.delete(id);
+    save(firestore.deleteDoc(firestore.doc(db, 'images', id)));
+  };
 
   // --- Reading sessions --------------------------------------------------------
   //
@@ -217,6 +333,57 @@
   function deleteSession(id) {
     if (reportSession === id) reportSession = null;
     save(firestore.deleteDoc(firestore.doc(db, 'sessions', id)));
+  }
+
+  const sessionStart = (session) => Number(session.startedAt) || 0;
+
+  /**
+   * Folds several reading reports into one, under the earliest of their times. A question answered
+   * in only one of them keeps that answer; a question answered in more than one keeps the earliest,
+   * since that is what the reader said the first time through. The reports folded in are removed.
+   */
+  function mergeSessions(sessions) {
+    const order = [...sessions].sort((a, b) => sessionStart(a) - sessionStart(b));
+    const [keep, ...rest] = order;
+    if (!rest.length) return;
+
+    const answers = {};
+    const times = {};
+    for (const each of order) {
+      for (const [widgetId, answer] of Object.entries(each.answers ?? {})) {
+        const at = Number(answer.answeredAt) || sessionStart(each);
+        if (!(widgetId in answers) || at < times[widgetId]) {
+          answers[widgetId] = answer;
+          times[widgetId] = at;
+        }
+      }
+    }
+
+    // A report made of merged reports can be merged again, so count the readings, not the reports.
+    const readings = order.reduce((total, each) => total + (Number(each.mergedFrom) || 1), 0);
+    reportSession = keep.id;
+    reportPicked.clear();
+    save(firestore.updateDoc(firestore.doc(db, 'sessions', keep.id), {
+      answers,
+      mergedFrom: readings,
+      mergedAt: Date.now(),
+    }));
+    for (const each of rest) save(firestore.deleteDoc(firestore.doc(db, 'sessions', each.id)));
+  }
+
+  /**
+   * A picture has no answer, but whether it was uncovered and how long the reader stayed with it
+   * are worth knowing, so they go on the session the same way an answer does.
+   */
+  function recordReveal(chapter, widget, seconds) {
+    if (!session) return;
+    save(firestore.updateDoc(firestore.doc(db, 'sessions', session.id), new firestore.FieldPath('answers', widget.id), {
+      question: widget.alt || '',
+      chapter: chapter.title,
+      revealed: true,
+      seconds,
+      answeredAt: Date.now(),
+    }));
   }
 
   function recordAnswer(chapter, widget, value, label) {
@@ -257,24 +424,32 @@
 
   async function start() {
     try {
-      const [{ initializeApp }, sdk] = await Promise.all([
-        import(`${FIREBASE_SDK}/firebase-app.js`),
-        import(`${FIREBASE_SDK}/firebase-firestore.js`),
-      ]);
-      firestore = sdk;
-      db = firestore.initializeFirestore(initializeApp(firebaseConfig), {
-        // A copy kept in the browser makes the app open fast and keep working offline.
-        localCache: firestore.persistentLocalCache({ tabManager: firestore.persistentMultipleTabManager() }),
-      });
+      // Firestore's REST API, not its realtime channel: the long-lived connection the Firebase SDK
+      // needs is refused on some networks, which left this app loading for ever. See firestore-rest.js.
+      connectTo(readConfig());
     } catch (error) {
       console.error(error);
-      showStatus('Couldn’t load Firebase. Check your internet connection and reload the page.');
-      return;
+      showStatus('Couldn’t reach your stories. Check your internet connection and reload the page.');
     }
+  }
 
-    firestore.onSnapshot(firestore.collection(db, 'stories'), applySnapshot, (error) => {
+  // Set while the cache is empty and Firestore hasn't answered yet.
+  let waitingTimer = 0;
+
+  /** Says the stories are still on their way, so an unreachable server never reads as "none". */
+  function waitForServer() {
+    if (waitingTimer) return;
+    waitingTimer = setTimeout(() => {
+      ui.statusText.textContent = 'Still reaching for your stories. They are safe online — this page '
+        + 'fills in as soon as it connects.';
+    }, 6000);
+  }
+
+  function listenForStories() {
+    waitForServer();
+    storiesWatch = firestore.onSnapshot(firestore.collection(db, 'stories'), applySnapshot, (error) => {
       console.error(error);
-      if (loaded) showNotice(`Your stories stopped syncing. ${explain(error)} Reload the page to try again.`);
+      if (loaded) showNotice(`Your stories stopped syncing. ${explain(error)} Reload the page to try again.`, { keep: true });
       else showStatus(`Couldn’t load your stories. ${explain(error)}`);
     });
   }
@@ -286,6 +461,7 @@
       id: doc.id,
       name: String(data.name ?? 'Untitled story'),
       createdAt: Number(data.createdAt) || 0,
+      hidden: data.hidden === true, // put aside: out of the sidebar, though readers still get it
       chapters: Object.entries(data.chapters ?? {})
         .map(([id, chapter]) => ({
           id,
@@ -299,6 +475,8 @@
               line: Number(widget.line) || 0, // widgets saved before spots were characters
               offset: Number.isFinite(Number(widget.offset)) ? Number(widget.offset) : undefined,
               anchor: String(widget.anchor ?? ''),
+              imageId: widget.imageId ? String(widget.imageId) : '',
+              alt: String(widget.alt ?? ''),
               question: String(widget.question ?? ''),
               labels: Array.isArray(widget.labels) ? widget.labels.map((label) => String(label ?? '')) : [],
               createdAt: Number(widget.createdAt) || 0,
@@ -315,8 +493,9 @@
    * Returns whether anything changed.
    */
   function mergeStory(story, latest) {
-    let changed = story.name !== latest.name;
+    let changed = story.name !== latest.name || story.hidden !== latest.hidden;
     story.name = latest.name;
+    story.hidden = latest.hidden;
     story.createdAt = latest.createdAt;
 
     const known = new Map(story.chapters.map((chapter) => [chapter.id, chapter]));
@@ -370,6 +549,14 @@
     state.stories.sort(byCreation);
 
     if (!loaded) {
+      // An empty cache is not proof that there are no stories: a browser that can't reach Firestore
+      // yet looks exactly the same. Wait for the server rather than offering a blank start, which
+      // would invite writing a new story over a library that is merely out of reach.
+      if (snapshot.metadata.fromCache && !snapshot.docs.length) {
+        waitForServer();
+        return;
+      }
+      clearTimeout(waitingTimer);
       loaded = true;
       ensureSelection();
       showPart();
@@ -421,6 +608,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     pen: '<path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1Z"/><path d="m14 7 3 3"/>',
     trash: '<path d="M4 7h16M9 7V4.5h6V7M6 7l1 12.5h10L18 7M10 11v5M14 11v5"/>',
+    aside: '<path d="M3 8h18v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M5 8V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v3"/><path d="M10 13h4"/>',
   };
 
   function icon(name) {
@@ -502,6 +690,7 @@
     readerMore: $('reader-more'),
     status: $('status'),
     statusText: $('status-text'),
+    statusReset: $('status-reset'),
     welcome: $('welcome'),
     welcomeForm: $('welcome-form'),
     welcomeInput: $('welcome-name'),
@@ -512,6 +701,8 @@
     newStoryForm: $('new-story-form'),
     newStoryInput: $('new-story-name'),
     editor: $('editor-inner'),
+    noStory: $('no-story'),
+    storyHeader: $('story-header'),
     storyTitle: $('story-title'),
     storyMeta: $('story-meta'),
     firstChapterButton: $('first-chapter-btn'),
@@ -522,31 +713,56 @@
     reportBack: $('report-back'),
     reportBody: $('report-body'),
     addWidgetFab: $('add-widget-fab'),
+    widgetCountFab: $('widget-count-fab'),
+    widgetCount: $('widget-count'),
+    widgetDrawer: $('widget-drawer'),
+    widgetDrawerTitle: $('widget-drawer-title'),
+    widgetDrawerBody: $('widget-drawer-body'),
+    widgetDrawerClose: $('widget-drawer-close'),
+    widgetDrawerClear: $('widget-drawer-clear'),
     pickBar: $('pick-bar'),
     pickCancel: $('pick-cancel'),
     rowHighlight: $('row-highlight'),
+    kindDialog: $('kind-dialog'),
+    kindChoices: $('kind-choices'),
+    kindCancel: $('kind-cancel'),
     widgetDialog: $('widget-dialog'),
     widgetForm: $('widget-form'),
     widgetDialogTitle: $('widget-dialog-title'),
     widgetQuestion: $('widget-question'),
     widgetWhere: $('widget-where'),
     widgetChangeLine: $('widget-change-line'),
+    widgetScaleFields: $('widget-scale-fields'),
+    widgetImageFields: $('widget-image-fields'),
+    widgetImageFile: $('widget-image-file'),
+    widgetImagePreview: $('widget-image-preview'),
+    widgetImageAlt: $('widget-image-alt'),
+    widgetLabelsField: $('widget-labels-field'),
     widgetLabels: $('widget-labels'),
     widgetError: $('widget-error'),
     widgetDelete: $('widget-delete'),
     widgetPopup: $('widget-popup'),
     popupQuestion: $('widget-popup-question'),
-    popupLabel: $('widget-popup-label'),
     popupScale: $('widget-popup-scale'),
+    popupActions: $('widget-popup-actions'),
     popupClose: $('widget-popup-close'),
-    deleteDialog: $('delete-dialog'),
-    deleteTitle: $('delete-dialog-title'),
-    deleteText: $('delete-dialog-text'),
-    deleteConfirm: $('delete-dialog-confirm'),
+    confirmDialog: $('delete-dialog'),
+    confirmTitle: $('delete-dialog-title'),
+    confirmText: $('delete-dialog-text'),
+    confirmButton: $('delete-dialog-confirm'),
     notice: $('notice'),
     noticeText: $('notice-text'),
     noticeClose: $('notice-close'),
     logout: $('logout'),
+    moreStoriesButton: $('more-stories-btn'),
+    moreStories: $('more-stories'),
+    moreStoriesBody: $('more-stories-body'),
+    galleryButton: $('gallery-btn'),
+    gallery: $('gallery'),
+    galleryBody: $('gallery-body'),
+    manageButton: $('manage-db-btn'),
+    database: $('database'),
+    databaseBody: $('database-body'),
   };
 
   // The entry screen's own heading and text, to put back after the story picker replaced them.
@@ -560,19 +776,58 @@
 
   function render() {
     ensureSelection();
+    // An empty library is the welcome screen. A library whose stories are all put aside is not
+    // empty, so it keeps the workspace — the sidebar is the only way back to More stories.
     const hasStories = state.stories.length > 0;
     ui.status.hidden = true;
     ui.welcome.hidden = hasStories;
     ui.workspace.hidden = !hasStories;
 
-    if (hasStories) {
-      renderStoryList();
-      renderStory();
-    } else {
+    if (!hasStories) {
       document.title = APP_NAME;
       closeNewStoryForm();
       ui.welcomeInput.focus();
+      return;
     }
+
+    renderStoryList();
+    renderEditor();
+  }
+
+  /** The right-hand side shows the open story, or says why there isn't one. */
+  function renderEditor() {
+    const story = currentStory();
+    // A full-screen panel stands in for the story, so it decides what is on show while it is up.
+    const panelUp = !(ui.report.hidden && ui.database.hidden && ui.gallery.hidden && ui.moreStories.hidden);
+
+    ui.storyHeader.hidden = !story || panelUp;
+    ui.chapterList.hidden = !story || panelUp;
+    ui.noStory.hidden = Boolean(story) || panelUp;
+
+    if (story) {
+      renderStory();
+      return;
+    }
+
+    draftChapter = null;
+    ui.chapterList.replaceChildren();
+    ui.firstChapterButton.hidden = true;
+    ui.addChapterButton.hidden = true;
+    document.title = APP_NAME;
+    renderNoStory();
+    updateWidgetFab();
+  }
+
+  /** Nothing is on show: say so, and point at where the rest of the library went. */
+  function renderNoStory() {
+    const aside = putAside().length;
+    ui.noStory.replaceChildren(
+      h('h1', { class: 'story-title' }, 'Nothing open'),
+      h('p', { class: 'story-meta' }, aside
+        ? `Every story is under More stories — ${plural(aside, 'story')} waiting there.`
+        : 'Start one from the list on the left.'),
+      ...(aside ? [h('p', { class: 'no-story__action' },
+        h('button', { class: 'btn btn--soft', type: 'button', onclick: openMoreStories }, 'More stories'))] : []));
   }
 
   /** Replaces everything with an error, when the stories can't be loaded at all. */
@@ -581,18 +836,34 @@
     ui.status.hidden = false;
     ui.status.classList.add('is-error');
     ui.statusText.textContent = message;
+    // This screen replaces the sidebar, so a connection typed in by hand that turns out to be wrong
+    // would otherwise leave no way back to correct it — not even after a reload.
+    ui.statusReset.hidden = usingDefaultConfig();
   }
 
-  function showNotice(message) {
+  let noticeTimer = 0;
+
+  /**
+   * A line along the bottom of the screen. It clears itself after five seconds, unless it is
+   * carrying bad news — something that didn't save is worth leaving on screen until it is read.
+   */
+  function showNotice(message, { keep = false } = {}) {
+    clearTimeout(noticeTimer);
     ui.noticeText.textContent = message;
     ui.notice.hidden = false;
+    if (!keep) noticeTimer = setTimeout(hideNotice, 5000);
+  }
+
+  function hideNotice() {
+    clearTimeout(noticeTimer);
+    ui.notice.hidden = true;
   }
 
   /** Updates the sidebar in place, so a click on it is never lost to a re-render. */
   function renderStoryList() {
     const items = new Map([...ui.storyList.children].map((item) => [item.dataset.id, item]));
 
-    state.stories.forEach((story, index) => {
+    openStories().forEach((story, index) => {
       let item = items.get(story.id);
       if (item) {
         items.delete(story.id);
@@ -601,16 +872,24 @@
           h('button', { class: 'story-link', type: 'button', onclick: () => selectStory(story.id) },
             h('span', { class: 'story-link__name' }),
             h('span', { class: 'story-link__meta' })),
-          h('button', { class: 'story-delete', type: 'button', title: 'Delete story', onclick: () => askToDeleteStory(story.id) },
-            icon('trash')));
+          h('div', { class: 'story-actions' },
+            h('button', { class: 'story-action', type: 'button', title: 'Put this story aside', onclick: () => putStoryAside(story) },
+              icon('aside')),
+            h('button', { class: 'story-action', type: 'button', title: 'Delete story', onclick: () => askToDeleteStory(story.id) },
+              icon('trash'))));
       }
 
-      const [link, deleteButton] = item.children;
+      const [link, actions] = item.children;
+      const [asideButton, deleteButton] = actions.children;
       link.title = story.name;
       link.children[0].textContent = story.name;
       link.children[1].textContent = chapterCount(story);
+      asideButton.setAttribute('aria-label', `Put “${story.name}” aside`);
       deleteButton.setAttribute('aria-label', `Delete “${story.name}”`);
-      if (story.id === state.selectedId) link.setAttribute('aria-current', 'true');
+      // The database screen belongs to no story, so nothing in the list is current while it is up.
+      if (story.id === state.selectedId && ui.database.hidden && ui.gallery.hidden && ui.moreStories.hidden) {
+        link.setAttribute('aria-current', 'true');
+      }
       else link.removeAttribute('aria-current');
 
       if (ui.storyList.children[index] !== item) {
@@ -619,21 +898,72 @@
     });
 
     items.forEach((item) => item.remove());
+    // The aside list is another view of the same library, so it follows along.
+    if (!ui.moreStories.hidden) renderMoreStories();
   }
 
   /** Shows the open story from scratch (after switching stories). */
   function renderStory() {
     draftChapter = null;
-    closeReport();
     ui.chapterList.replaceChildren();
     syncStory();
+  }
+
+  // The story title's text node, so a change from another device can be dropped straight into it.
+  // Null while the title is being renamed here.
+  let storyTitleText = null;
+
+  /** The story's name, click to rename — the same as a chapter's title. */
+  function showStoryTitle(story) {
+    storyTitleText = document.createTextNode(story.name);
+    ui.storyTitle.replaceChildren(
+      h('button', { class: 'story-title-btn', type: 'button', title: 'Rename story', onclick: renameStoryTitle },
+        storyTitleText, icon('pen')));
+  }
+
+  /** Keeps the heading current without interrupting a rename already under way. */
+  function syncStoryTitle(story) {
+    if (ui.storyTitle.querySelector('input')) return; // being renamed here: leave it alone
+    if (storyTitleText && storyTitleText.isConnected) {
+      if (storyTitleText.data !== story.name) storyTitleText.data = story.name;
+      return;
+    }
+    showStoryTitle(story);
+  }
+
+  function renameStoryTitle() {
+    const story = currentStory();
+    if (!story) return;
+    storyTitleText = null;
+    const input = h('input', {
+      class: 'story-title-input',
+      type: 'text',
+      maxlength: '120',
+      placeholder: 'Story name',
+      autocomplete: 'off',
+      'aria-label': 'Story name',
+      value: story.name,
+    });
+    ui.storyTitle.replaceChildren(input);
+    input.focus();
+    input.select();
+
+    whenTitleDone(input, (name, byKeyboard) => {
+      if (name && name !== story.name) {
+        renameStory(story, name);
+        renderStoryList(); // the sidebar carries the name too
+        document.title = `${name} · ${APP_NAME}`;
+      }
+      showStoryTitle(currentStory() || story); // the input is still in place, so rebuild outright
+      if (byKeyboard) ui.storyTitle.querySelector('button').focus();
+    });
   }
 
   /** Brings the open story on screen up to date without disturbing anything being edited. */
   function syncStory() {
     const story = currentStory();
     document.title = `${story.name} · ${APP_NAME}`;
-    ui.storyTitle.textContent = story.name;
+    syncStoryTitle(story);
     syncChapters(story);
     updateChapterButtons(story);
     updateMeta(story);
@@ -663,8 +993,11 @@
   /** "Add your first chapter" while there are none, "Add a new chapter" after that. */
   function updateChapterButtons(story) {
     const hasChapters = story.chapters.length > 0;
-    ui.firstChapterButton.hidden = hasChapters || draftChapter !== null || picking;
-    ui.addChapterButton.hidden = !hasChapters || draftChapter !== null || picking;
+    // Hidden while naming a chapter, picking a line, or looking at the reports or the database.
+    const busy = draftChapter !== null || picking
+      || !ui.report.hidden || !ui.database.hidden || !ui.gallery.hidden || !ui.moreStories.hidden;
+    ui.firstChapterButton.hidden = hasChapters || busy;
+    ui.addChapterButton.hidden = !hasChapters || busy;
   }
 
   function updateMeta(story = currentStory()) {
@@ -676,8 +1009,7 @@
   function chapterItem(story, chapter) {
     const head = h('div', { class: 'chapter__head' });
     const body = h('div', { class: 'chapter__body' });
-    const widgets = h('div', { class: 'chapter__widgets' });
-    const item = h('li', { class: 'chapter', 'data-id': chapter.id }, head, body, widgets);
+    const item = h('li', { class: 'chapter', 'data-id': chapter.id }, head, body);
 
     let number = 0;
     let titleText = null; // the title's text node (null while the title is being renamed)
@@ -768,35 +1100,9 @@
       dots.replaceChildren(...contentNodes(chapter, { marks: widgetMarks((widget) => editWidget(story, chapter, widget)) }));
     }
 
-    /** The widgets attached to this chapter's lines, and the button that adds another. */
-    function showWidgets() {
-      const rows = chapter.widgets.map((widget) => {
-        const snippet = widgetSnippet(chapter, widget);
-        return h('li', { class: 'widget-row' },
-          h('button', { class: 'widget-row__open', type: 'button', onclick: () => editWidget(story, chapter, widget) },
-            h('span', { class: 'widget-row__question' }, widget.question || 'Untitled question'),
-            h('span', { class: 'widget-row__where' }, snippet
-              ? `Pops up at: ${snippet}`
-              : 'Its text is gone from the chapter: open it to pick a new spot')),
-          h('button', {
-            class: 'widget-row__remove',
-            type: 'button',
-            title: 'Remove widget',
-            'aria-label': `Remove the widget “${widget.question}”`,
-            onclick: () => {
-              removeWidget(story, chapter, widget);
-              showWidgets();
-            },
-          }, icon('trash')));
-      });
-
-      widgets.replaceChildren(...(rows.length ? [h('ul', { class: 'widget-list' }, ...rows)] : []));
-    }
-
     /** Shows the chapter's current number, title and text, e.g. after a change on another device. */
     item.sync = (position) => {
       number = position; // still used to tell screen readers which chapter a field belongs to
-      showWidgets();
       if (titleText && titleText.data !== chapter.title) titleText.data = chapter.title;
       if (picking) {
         showLines();
@@ -822,7 +1128,6 @@
     if (picking) showLines();
     else if (chapter.content) showContent(false);
     else showAddContentButton();
-    showWidgets();
     return item;
   }
 
@@ -904,7 +1209,7 @@
         // line, and the dot has to land in the same place here as it does in the reader's text.
         pieces.push(h('span', Object.assign(
           { class: mark.className, 'data-widget': mark.widget.id },
-          mark.onclick ? { title: `Edit the widget “${mark.widget.question}”`, onclick: mark.onclick } : null)));
+          mark.onclick ? { title: `Edit the widget “${widgetTitle(mark.widget)}”`, onclick: mark.onclick } : null)));
         cursor = at;
       }
       pieces.push(chapter.content.slice(cursor, end));
@@ -1011,6 +1316,42 @@
     chooseSpot(chapter, Number(paragraph.dataset.start) + rowStartOffset(paragraph, rect.top));
   }
 
+  /**
+   * The kinds of widget that can be added. Each one appears in the gallery and in the chooser at the
+   * top of the widget form; the samples are only for the preview and are never saved to a story.
+   */
+  const WIDGET_TYPES = [
+    {
+      type: 'scale',
+      name: 'Scale of 1 to 10',
+      about: 'A question with a slider from 1 to 10. Any number can carry a label, and the one the '
+        + 'slider rests on is shown as it moves.',
+      answers: true,
+      sample: {
+        question: 'How much would you want to go back there?',
+        labels: ['Not at all', '', '', '', 'Some of me', '', '', '', '', 'All of me'],
+      },
+    },
+    {
+      type: 'image',
+      name: 'Picture',
+      about: 'A picture of your own, kept under a cover. The reader drags the line across to uncover '
+        + 'it, and only then can they carry on.',
+      answers: false,
+      sample: {
+        alt: 'The hills on the way back',
+        data: "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 400'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23c98b6b'/%3E%3Cstop offset='1' stop-color='%238c4a32'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='640' height='400' fill='url(%23g)'/%3E%3Ccircle cx='470' cy='110' r='52' fill='%23f6e9df' opacity='.85'/%3E%3Cpath d='M0 300 L170 180 L300 270 L430 160 L640 300 L640 400 L0 400 Z' fill='%23472a1c' opacity='.55'/%3E%3Cpath d='M0 340 L200 250 L360 330 L520 245 L640 320 L640 400 L0 400 Z' fill='%232b1810' opacity='.7'/%3E%3C/svg%3E",
+      },
+    },
+  ];
+
+  const widgetKind = (widget) => WIDGET_TYPES.find((kind) => kind.type === (widget.type || 'scale')) || WIDGET_TYPES[0];
+
+  /** What a widget is called in a list: its question, or its caption, or the kind it is. */
+  const widgetTitle = (widget) => (widget.type === 'image'
+    ? (widget.alt || 'Picture')
+    : (widget.question || 'Untitled question'));
+
   // ---------------------------------------------------------------------------
   // Widgets: the backend form
   // ---------------------------------------------------------------------------
@@ -1019,9 +1360,132 @@
   let widgetDraft = null;
   let picking = false; // the writer is clicking a line in the chapters
 
-  /** The floating button is there whenever a story is open for writing. */
+  /** The floating buttons are there whenever a story is open for writing. */
   function updateWidgetFab() {
-    ui.addWidgetFab.hidden = !(part === 'write' && currentStory() && !picking && ui.report.hidden);
+    const story = currentStory();
+    const writing = part === 'write' && story
+      && ui.report.hidden && ui.database.hidden && ui.gallery.hidden && ui.moreStories.hidden;
+    // While a line is being picked, the prompt and Cancel stand in the button's place; the list of
+    // widgets stays put, so it can be opened without giving up on the widget being added.
+    ui.addWidgetFab.hidden = !writing;
+    ui.addWidgetFab.classList.toggle('fab--standby', picking);
+    ui.pickBar.hidden = !writing || !picking;
+
+    const widgets = story ? storyWidgets(story).length : 0;
+    ui.widgetCountFab.hidden = !writing || !widgets;
+    ui.widgetCount.textContent = plural(widgets, 'widget');
+    if (!widgets) closeWidgetDrawer();
+    else if (!ui.widgetDrawer.hidden) renderWidgetDrawer();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Widgets: the drawer listing every one in the story
+  // ---------------------------------------------------------------------------
+
+  /** Starts a widget: the chapters turn into lines to click. */
+  function startNewWidget() {
+    const story = currentStory();
+    if (!story) return;
+    if (!story.chapters.some((chapter) => contentLines(chapter.content).length)) {
+      showNotice('Write some text in a chapter first, then pick the line where the widget appears.');
+      return;
+    }
+    startLinePicking({ story, chapter: null, widget: null, line: 0, question: '', labels: [] });
+  }
+
+  function openWidgetDrawer() {
+    ui.widgetDrawer.hidden = false;
+    document.body.classList.add('has-drawer');
+    makeRoomForDrawer();
+    renderWidgetDrawer();
+    ui.widgetDrawerClose.focus();
+  }
+
+  function closeWidgetDrawer() {
+    if (ui.widgetDrawer.hidden) return;
+    ui.widgetDrawer.hidden = true;
+    document.body.classList.remove('has-drawer');
+    makeRoomForDrawer();
+    if (!ui.widgetCountFab.hidden) ui.widgetCountFab.focus();
+  }
+
+  /**
+   * The page narrows to make room for the drawer, so the chapter text rewraps and the boxes holding
+   * it need measuring again — once now and once when the page has finished narrowing.
+   */
+  function makeRoomForDrawer() {
+    refitTextareas();
+    setTimeout(refitTextareas, 280);
+  }
+
+  const toggleWidgetDrawer = () => (ui.widgetDrawer.hidden ? openWidgetDrawer() : closeWidgetDrawer());
+
+  function renderWidgetDrawer() {
+    const story = currentStory();
+    if (!story) return;
+    const all = storyWidgets(story);
+    ui.widgetDrawerTitle.textContent = plural(all.length, 'widget');
+    ui.widgetDrawerClear.hidden = all.length < 2;
+
+    ui.widgetDrawerBody.replaceChildren(all.length
+      ? h('ul', { class: 'drawer__list' }, ...all.map(({ chapter, widget }) => {
+        const snippet = widgetSnippet(chapter, widget);
+        return h('li', { class: 'drawer__item' },
+          h('button', { class: 'drawer__find', type: 'button', onclick: () => showWidgetSpot(chapter, widget) },
+            h('span', { class: 'drawer__question' }, widgetTitle(widget)),
+            h('span', { class: 'drawer__where' }, snippet
+              ? `${chapter.title} · “${snippet}”`
+              : `${chapter.title} · its text is gone from the chapter`)),
+          h('button', {
+            class: 'drawer__remove',
+            type: 'button',
+            title: 'Delete widget',
+            'aria-label': `Delete the widget “${widgetTitle(widget)}”`,
+            onclick: () => deleteWidgetFromDrawer(story, chapter, widget),
+          }, icon('trash')));
+      }))
+      : h('p', { class: 'drawer__empty' }, 'This story has no widgets yet.'));
+  }
+
+  /**
+   * Scrolls the chapter text to a widget's spot and makes its dot beat, so the writer can see where
+   * it fires without opening it.
+   */
+  function showWidgetSpot(chapter, widget) {
+    const card = ui.chapterList.querySelector(`[data-id="${chapter.id}"]`);
+    const mark = card && card.querySelector(`.chapter__mark[data-widget="${widget.id}"]`);
+    if (!mark) {
+      showNotice('That widget’s line isn’t on screen: its text may have been removed from the chapter.');
+      return;
+    }
+
+    const top = window.scrollY + mark.getBoundingClientRect().top - window.innerHeight / 3;
+    window.scrollTo({ top, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+
+    mark.classList.remove('is-found');
+    void mark.offsetWidth; // restart the beat if the same widget is clicked again
+    mark.classList.add('is-found');
+  }
+
+  function deleteWidgetFromDrawer(story, chapter, widget) {
+    removeWidget(story, chapter, widget);
+    syncStory(); // redraws the dots, the count and the drawer
+  }
+
+  function askToRemoveAllWidgets() {
+    const story = currentStory();
+    const all = story ? storyWidgets(story) : [];
+    if (!all.length) return;
+    askToConfirm({
+      title: `Delete all ${plural(all.length, 'widget')}?`,
+      text: `Every widget in “${story.name}” goes, along with the questions and labels on them. `
+        + 'Answers already given stay in the reading reports. This can’t be undone.',
+      confirm: 'Delete them all',
+      then: () => {
+        for (const { chapter, widget } of all) removeWidget(story, chapter, widget);
+        syncStory();
+      },
+    });
   }
 
   /** Step one: the chapters turn into clickable lines. */
@@ -1029,21 +1493,19 @@
     saveTyping(); // the preview replaces the text boxes, so send anything just typed
     widgetDraft = draft;
     picking = true;
-    ui.pickBar.hidden = false;
     keepingScroll(syncStory); // syncStory, not renderStory: the writer stays where they were reading
   }
 
   function endLinePicking() {
     picking = false;
-    ui.pickBar.hidden = true;
     keepingScroll(syncStory);
   }
 
   function cancelLinePicking() {
     const draft = widgetDraft;
     endLinePicking();
-    // Keep whatever was already typed if this was a change of line rather than a new widget.
-    if (draft && (draft.widget || draft.question)) showWidgetDialog(draft);
+    // Keep whatever was already set if this was a change of line rather than a new widget.
+    if (draft && (draft.widget || draft.kindChosen)) showWidgetDialog(draft);
     else widgetDraft = null;
   }
 
@@ -1052,38 +1514,125 @@
     widgetDraft.chapter = chapter;
     widgetDraft.offset = offset;
     endLinePicking();
-    showWidgetDialog(widgetDraft);
+    // A brand-new widget is asked what kind it is first; everything else goes straight to the form.
+    if (!widgetDraft.widget && !widgetDraft.kindChosen) showKindChooser();
+    else showWidgetDialog(widgetDraft);
+  }
+
+  /** Step one and a half: the kinds on offer, as cards that come up one after another. */
+  function showKindChooser() {
+    ui.kindChoices.replaceChildren(...WIDGET_TYPES.map((kind, index) => {
+      const card = h('button', {
+        class: 'choices__one',
+        type: 'button',
+        onclick: () => {
+          ui.kindDialog.returnValue = kind.type;
+          ui.kindDialog.close();
+        },
+      }, h('span', { class: 'choices__name' }, kind.name));
+      card.style.animationDelay = `${index * 70}ms`;
+      return card;
+    }));
+    ui.kindDialog.returnValue = ''; // closing with Escape keeps the old value, so clear it
+    ui.kindDialog.showModal();
   }
 
   /** Step two: the question and the ten labels. */
   function showWidgetDialog(draft) {
     widgetDraft = draft;
+    draft.type = draft.type || 'scale';
     const from = draft.chapter.content.slice(draft.offset, draft.offset + 110).replace(/\n+/g, ' ');
     ui.widgetDialogTitle.textContent = draft.widget ? 'Edit widget' : 'Add a widget';
     ui.widgetQuestion.value = draft.question || '';
+    ui.widgetImageAlt.value = draft.alt || '';
+    ui.widgetImageFile.value = '';
+    showKindFields();
+    showImagePreview();
     ui.widgetWhere.textContent = `${draft.chapter.title} · “${truncate(from, 90)}”`;
-    ui.widgetLabels.replaceChildren(...Array.from({ length: 10 }, (unused, index) =>
-      h('label', { class: 'labels__option' },
-        h('span', { class: 'labels__number' }, String(index + 1)),
-        h('input', {
-          class: 'field__input',
-          type: 'text',
-          maxlength: '60',
-          autocomplete: 'off',
-          'aria-label': `Label for ${index + 1}`,
-          value: (draft.labels && draft.labels[index]) || '',
-        }))));
+    ui.widgetLabels.replaceChildren(...labelFields(draft.labels));
     ui.widgetDelete.hidden = !draft.widget;
     ui.widgetError.textContent = '';
     ui.widgetDialog.returnValue = '';
     ui.widgetDialog.showModal();
-    ui.widgetQuestion.focus();
+    if (draft.type === 'image') ui.widgetImageFile.focus();
+    else ui.widgetQuestion.focus();
+  }
+
+  /** The ten label fields of a scale. */
+  const labelFields = (labels) => Array.from({ length: 10 }, (unused, index) =>
+    h('label', { class: 'labels__option' },
+      h('span', { class: 'labels__number' }, String(index + 1)),
+      h('input', {
+        class: 'field__input',
+        type: 'text',
+        maxlength: '60',
+        autocomplete: 'off',
+        'aria-label': `Label for ${index + 1}`,
+        value: (labels && labels[index]) || '',
+      })));
+
+  /** The kind was settled before the form opened, so only its own fields are shown. */
+  function showKindFields() {
+    const image = widgetDraft.type === 'image';
+    ui.widgetScaleFields.hidden = image;
+    ui.widgetLabelsField.hidden = image;
+    ui.widgetImageFields.hidden = !image;
+  }
+
+  /** What the picked picture looks like, before it goes anywhere. */
+  function showImagePreview() {
+    const data = widgetDraft && widgetDraft.imageData;
+    ui.widgetImagePreview.hidden = !data || widgetDraft.type !== 'image';
+    ui.widgetImagePreview.replaceChildren(...(data
+      ? [h('img', { class: 'image-preview__img', src: data, alt: '' }),
+        h('p', { class: 'image-preview__note' }, widgetDraft.imageNote || '')]
+      : []));
+  }
+
+  /** Reads the file the writer picked, shrinking it if it is too big to store. */
+  async function pickImage(file) {
+    if (!file || !widgetDraft) return;
+    ui.widgetError.textContent = '';
+    ui.widgetImagePreview.hidden = false;
+    ui.widgetImagePreview.replaceChildren(h('p', { class: 'image-preview__note' }, 'Reading the picture…'));
+    try {
+      const picture = await prepareImage(file);
+      if (!widgetDraft) return; // the form was closed while the file was being read
+      widgetDraft.imageData = picture.data;
+      widgetDraft.imageSize = picture;
+      widgetDraft.imageNote = `${picture.width}×${picture.height}`
+        + (picture.shrunk ? ' · shrunk to fit' : '')
+        + ` · ${formatBytes(Math.round(picture.data.length * 0.75))}`;
+    } catch (error) {
+      widgetDraft.imageData = null;
+      ui.widgetError.textContent = error.message;
+    }
+    showImagePreview();
   }
 
   /** Opens the form for a widget that already exists, from its row in the chapter. */
   function editWidget(story, chapter, widget) {
     const offset = widgetOffset(chapter, widget);
-    const draft = { story, chapter, widget, offset, question: widget.question, labels: [...widget.labels] };
+    const draft = {
+      story,
+      chapter,
+      widget,
+      offset,
+      type: widget.type || 'scale',
+      question: widget.question,
+      alt: widget.alt || '',
+      labels: [...widget.labels],
+      imageData: null,
+      imageNote: 'Fetching the picture…',
+    };
+    if (widget.type === 'image' && widget.imageId) {
+      loadImage(widget.imageId).then((data) => {
+        if (widgetDraft !== draft) return; // the form moved on while it was being fetched
+        draft.imageData = data;
+        draft.imageNote = data ? 'The picture as it is now' : 'That picture is no longer in the database.';
+        showImagePreview();
+      });
+    }
     if (offset === -1) {
       showNotice('The text this widget was pinned to is gone. Pick a new spot for it.');
       startLinePicking(draft);
@@ -1095,6 +1644,7 @@
   function captureDialogValues() {
     if (!widgetDraft) return;
     widgetDraft.question = ui.widgetQuestion.value;
+    widgetDraft.alt = ui.widgetImageAlt.value;
     widgetDraft.labels = [...ui.widgetLabels.querySelectorAll('input')].map((input) => input.value);
   }
 
@@ -1102,30 +1652,61 @@
   function saveWidgetDialog(event) {
     if (!widgetDraft) return;
     captureDialogValues();
-    const { story, chapter, widget, offset } = widgetDraft;
-    const question = widgetDraft.question.trim();
-
-    if (!question) {
+    const { story, chapter, widget, offset, type } = widgetDraft;
+    const stop = (message) => {
       event.preventDefault(); // keep the form open
-      ui.widgetError.textContent = 'Give the widget a question.';
-      return;
-    }
+      ui.widgetError.textContent = message;
+    };
+
+    const question = (widgetDraft.question || '').trim();
+    if (type === 'scale' && !question) return stop('Give the widget a question.');
+    if (type === 'image' && !widgetDraft.imageData) return stop('Pick a picture to show.');
 
     // A widget can be moved to a spot in another chapter, so drop it from the old one first.
     const from = widget && story.chapters.find((candidate) => candidate.widgets.some((each) => each.id === widget.id));
     if (from && from !== chapter) removeWidget(story, from, widget);
 
-    saveWidget(story, chapter, {
+    const common = {
       id: widget ? widget.id : newId(),
-      type: 'scale',
+      type,
       offset,
       anchor: chapter.content.slice(offset, offset + 80), // keeps the spot when text above it changes
+      createdAt: widget ? widget.createdAt : Date.now(),
+    };
+
+    if (type === 'image') {
+      saveImageWidget(story, chapter, widget, common);
+      widgetDraft = null;
+      return;
+    }
+
+    saveWidget(story, chapter, Object.assign(common, {
       question,
       labels: widgetDraft.labels.map((label) => label.trim()),
-      createdAt: widget ? widget.createdAt : Date.now(),
-    });
+    }));
     widgetDraft = null;
     syncStory();
+  }
+
+  /**
+   * Stores the picture, then the widget that points at it. The form closes straight away; if the
+   * picture can't be stored the widget isn't written either, and the failure is said out loud.
+   */
+  async function saveImageWidget(story, chapter, widget, common) {
+    const keptImage = widget && widget.type === 'image' ? widget.imageId : null;
+    const picked = widgetDraft.imageData;
+    const alt = (widgetDraft.alt || '').trim();
+    const reuse = keptImage && picked === imagesSeen.get(keptImage);
+
+    try {
+      const imageId = reuse ? keptImage : await storeImage(widgetDraft.imageSize || { data: picked }, alt);
+      if (!reuse && keptImage) forgetImage(keptImage); // the picture it used to show
+      if (!reuse) imagesSeen.set(imageId, picked);
+      saveWidget(story, chapter, Object.assign(common, { imageId, alt }));
+      syncStory();
+    } catch (error) {
+      showNotice(`Couldn’t save the picture. ${explain(error)}`, { keep: true });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1136,6 +1717,7 @@
   const widgetQueue = [];
   const widgetsShown = new Set();
   let openWidgetEntry = null;
+  let revealedAt = 0; // when the picture in the open popup was uncovered
   let scrollFrame = 0;
 
   /** Collects the markers sitting at each widget's spot in the text that is on screen. */
@@ -1143,7 +1725,7 @@
     watchedSpots = [];
     for (const chapter of story.chapters) {
       for (const widget of chapter.widgets) {
-        if (!widget.question) continue;
+        if (!widget.question && widget.type !== 'image') continue; // nothing to show
         const element = ui.readerChapters.querySelector(`.reader__mark[data-widget="${widget.id}"]`);
         if (element) watchedSpots.push({ chapter, widget, element });
       }
@@ -1193,28 +1775,199 @@
     if (!openWidgetEntry) return;
 
     const { chapter, widget } = openWidgetEntry;
+
+    if (widget.type === 'image') {
+      // "Continue reading" waits until the cover is off, the way it waits for the slider.
+      ui.popupQuestion.textContent = widget.alt || '';
+      ui.popupQuestion.hidden = !widget.alt;
+      ui.popupActions.hidden = true;
+      revealedAt = 0;
+      ui.popupScale.replaceChildren(imageWidget(widget, {
+        onRevealed: () => {
+          revealedAt = Date.now(); // the clock on how long they stay with it
+          ui.popupActions.hidden = false;
+        },
+      }));
+      ui.widgetPopup.showModal();
+      return;
+    }
+
+    ui.popupQuestion.hidden = false;
     ui.popupQuestion.textContent = widget.question;
-    ui.popupLabel.textContent = '';
-    ui.popupLabel.hidden = true;
-    ui.popupScale.replaceChildren(...Array.from({ length: 10 }, (unused, index) =>
-      h('button', {
-        class: 'scale__number',
-        type: 'button',
-        'aria-pressed': 'false',
-        onclick: () => pickWidgetAnswer(chapter, widget, index + 1),
-      }, String(index + 1))));
+    ui.popupActions.hidden = true; // "Continue reading" waits until there is something to continue from
+    ui.popupScale.replaceChildren(scaleWidget(widget.labels, {
+      onPick: (value, label) => recordAnswer(chapter, widget, value, label),
+      onHold: () => { ui.popupActions.hidden = false; },
+    }));
     ui.widgetPopup.showModal();
   }
 
-  function pickWidgetAnswer(chapter, widget, value) {
-    const label = widget.labels[value - 1] || '';
-    ui.popupLabel.textContent = label;
-    ui.popupLabel.hidden = !label;
-    [...ui.popupScale.children].forEach((button, index) => {
-      button.classList.toggle('is-picked', index === value - 1);
-      button.setAttribute('aria-pressed', String(index === value - 1));
+  /**
+   * A picture as the reader meets it: covered, with a line to drag from left to right that wipes
+   * the cover away. The picture is only fetched when the widget opens, so the story's own documents
+   * stay small. `onRevealed` is called once the cover is all the way off.
+   */
+  function imageWidget(widget, { onRevealed } = {}) {
+    const frame = h('div', { class: 'reveal' },
+      h('p', { class: 'reveal__waiting' }, 'Fetching the picture…'));
+
+    const build = (data) => {
+      if (!data) {
+        frame.replaceChildren(h('p', { class: 'reveal__waiting' }, 'That picture is no longer in the database.'));
+        if (onRevealed) onRevealed(); // nothing to reveal, so don't trap the reader
+        return;
+      }
+
+      const picture = h('img', { class: 'reveal__img', src: data, alt: widget.alt || '' });
+      // The line lives inside the frame so the rounded corners cut it; the grip sits outside it so
+      // it stays whole even when the line is hard against an edge.
+      const frameInner = h('div', { class: 'reveal__frame' },
+        picture,
+        h('div', { class: 'reveal__line', 'aria-hidden': 'true' }));
+      const grip = h('div', { class: 'reveal__grip', 'aria-hidden': 'true' });
+      const range = h('input', {
+        class: 'reveal__range',
+        type: 'range',
+        min: '0',
+        max: '100',
+        step: '0.1',
+        value: '0',
+        'aria-label': `Drag to reveal the picture${widget.alt ? `: ${widget.alt}` : ''}`,
+      });
+
+      let done = false;
+      const paint = () => {
+        frame.style.setProperty('--revealed', `${Number(range.value)}%`);
+      };
+
+      // Once it has been taken hold of, the grip fills in and the flash that beckons stops.
+      const take = () => frame.classList.add('is-held');
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        range.value = '100';
+        range.disabled = true;
+        frame.classList.add('is-revealed');
+        paint();
+        if (onRevealed) onRevealed();
+      };
+
+      range.addEventListener('pointerdown', take);
+      range.addEventListener('keydown', take);
+      range.addEventListener('input', () => {
+        take();
+        paint();
+        if (Number(range.value) >= 99) finish();
+      });
+      // Let go near the end and the rest of the cover goes with it.
+      range.addEventListener('change', () => {
+        if (Number(range.value) >= 85) finish();
+      });
+
+      frame.reset = () => {
+        done = false;
+        range.disabled = false;
+        range.value = '0';
+        frame.classList.remove('is-revealed', 'is-held');
+        paint();
+      };
+
+      frame.replaceChildren(frameInner, grip, range);
+      paint();
+    };
+
+    if (widget.data) build(widget.data); // a sample, already to hand
+    else loadImage(widget.imageId).then(build, () => build(null));
+
+    frame.reset = () => {}; // replaced once the picture is here and the cover exists
+    return frame;
+  }
+
+  /**
+   * The 1-to-10 scale as the reader meets it: a slider that slides freely, with the number it is
+   * nearest and that number's label read out above it.
+   *
+   * The handle moves in hundredths so it follows the finger rather than jumping between ten stops,
+   * while the answer is always one of the ten. An untouched slider is not an answer — it only ever
+   * rests somewhere — so nothing is read from it until the reader takes hold. `onPick` is called
+   * once the handle settles, not on every step of a drag. Leave it out for a preview that records
+   * nothing.
+   */
+  function scaleWidget(labels, { onPick, onHold } = {}) {
+    // Built once and then only written to: a drag fires hundreds of events, and rebuilding this on
+    // each of them — worse, inside a live region — is what made the handle lag behind the pointer.
+    // The slider's own aria-valuetext is what a screen reader reads as it moves.
+    const labelNode = h('span', { class: 'scale__label', hidden: 'hidden' });
+    const valueNode = h('span', { class: 'scale__value' });
+    const readout = h('p', { class: 'scale__readout', hidden: 'hidden' }, labelNode, valueNode);
+    const slider = h('input', {
+      class: 'scale__slider',
+      type: 'range',
+      min: '1',
+      max: '10',
+      step: '0.01', // fine enough to glide; the answer is still rounded to a whole number
+      value: '5.5', // dead centre of the track; 5 would sit a little to the left
+      'aria-label': 'Choose a number from 1 to 10',
     });
-    recordAnswer(chapter, widget, value, label);
+
+    let held = false;
+    let showing = null; // the whole number on show, so a move within one costs nothing
+    const chosen = () => Math.min(10, Math.max(1, Math.round(Number(slider.value))));
+
+    const show = () => {
+      const value = chosen();
+      if (value === showing) return; // the handle moved, but not onto a different number
+      showing = value;
+      const label = labels[value - 1] || '';
+      labelNode.textContent = label;
+      labelNode.hidden = !label;
+      valueNode.textContent = String(value);
+      readout.hidden = false; // rises into place, pushing the question up
+      slider.setAttribute('aria-valuetext', label ? `${value}, ${label}` : String(value));
+      slider.classList.add('is-set');
+    };
+
+    const settle = () => {
+      take();
+      show();
+      if (onPick) onPick(chosen(), labels[chosen() - 1] || '');
+    };
+
+    const take = () => {
+      if (held) return;
+      held = true;
+      show();
+      if (onHold) onHold();
+    };
+
+    // Taking hold counts even when the handle doesn't move, so the number it rests on can be chosen.
+    slider.addEventListener('pointerdown', take);
+    slider.addEventListener('input', () => { take(); show(); });
+    slider.addEventListener('change', settle);
+
+    // Arrow keys move a whole number at a time; hundredths would be no use from a keyboard.
+    const STEPS = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 };
+    slider.addEventListener('keydown', (event) => {
+      const step = STEPS[event.key];
+      const edge = event.key === 'Home' ? 1 : event.key === 'End' ? 10 : null;
+      if (step === undefined && edge === null) return;
+      event.preventDefault();
+      slider.value = String(edge !== null ? edge : Math.min(10, Math.max(1, chosen() + step)));
+      settle();
+    });
+
+    const node = h('div', { class: 'scale' }, readout, slider);
+    node.reset = () => {
+      held = false;
+      showing = null;
+      slider.value = '5.5';
+      slider.classList.remove('is-set');
+      slider.removeAttribute('aria-valuetext');
+      readout.hidden = true;
+      labelNode.hidden = true;
+    };
+    return node;
   }
 
   // ---------------------------------------------------------------------------
@@ -1224,15 +1977,34 @@
   let reportWatch = null;
   let reportSessions = [];
   let reportSession = null; // the session being looked at, if any
+  const reportPicked = new Set(); // sessions ticked in the list, waiting to be merged
 
-  const storyWidgets = (story) => story.chapters.flatMap((chapter) => chapter.widgets.map((widget) => ({ chapter, widget })));
-  const answerCount = (session) => Object.keys(session.answers ?? {}).length;
+  /**
+   * Every widget in the story, in the order a reader meets them: chapter by chapter, and within a
+   * chapter by where it sits in the text — not by when it was made.
+   */
+  const storyWidgets = (story) => story.chapters.flatMap((chapter) => chapter.widgets
+    .map((widget) => ({ chapter, widget, at: widgetOffset(chapter, widget) }))
+    // One whose text has gone from the chapter has no place in it, so it goes last.
+    .sort((a, b) => (a.at < 0) - (b.at < 0) || a.at - b.at));
+
+  // Only some kinds ask something, and answers are what a report counts, so it counts those alone.
+  const storyQuestions = (story) => storyWidgets(story).filter(({ widget }) => widgetKind(widget).answers);
+
+  // Uncovering a picture is noted alongside the answers, but it isn't one.
+  const answerCount = (session) => Object.values(session.answers ?? {}).filter((one) => !one.revealed).length;
+  const revealCount = (session) => Object.values(session.answers ?? {}).filter((one) => one.revealed).length;
 
   function openReport() {
     const story = currentStory();
     if (!story) return;
 
     reportSession = null;
+    reportPicked.clear();
+    ui.database.hidden = true;
+    ui.gallery.hidden = true;
+    ui.moreStories.hidden = true;
+    ui.noStory.hidden = true;
     ui.report.hidden = false;
     ui.chapterList.hidden = true;
     ui.firstChapterButton.hidden = true;
@@ -1254,11 +2026,9 @@
     if (reportWatch) reportWatch();
     reportWatch = null;
     ui.report.hidden = true;
-    ui.chapterList.hidden = false;
     reportSession = null;
-    const story = currentStory();
-    if (!story) return;
-    updateChapterButtons(story);
+    reportPicked.clear();
+    renderEditor();
     updateWidgetFab();
   }
 
@@ -1283,21 +2053,42 @@
 
   /** Every reading session of this story, newest first. */
   function sessionsPage(story) {
-    const questions = storyWidgets(story).length;
+    const questions = storyQuestions(story).length;
+    const pictures = storyWidgets(story).length - questions;
     const answered = reportSessions.filter((session) => answerCount(session) > 0);
+    const picked = reportSessions.filter((session) => reportPicked.has(session.id));
 
     return h('div', {},
-      h('h2', { class: 'report__heading' }, 'Reading reports'),
+      // The merge controls sit on the heading's own line, appearing only once something is ticked.
+      h('div', { class: 'report__head' },
+        h('h2', { class: 'report__heading' }, 'Reading reports'),
+        ...(picked.length ? [h('div', { class: 'report__merge', role: 'status' },
+          h('span', { class: 'report__merge-count' }, picked.length < 2
+            ? 'One ticked · tick another to merge'
+            : `${plural(picked.length, 'report')} ticked`),
+          ...(picked.length > 1
+            ? [h('button', { class: 'btn btn--primary btn--small', type: 'button', onclick: () => askToMergeSessions(picked) }, 'Merge into one')]
+            : []),
+          h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: clearSessionPicks }, 'Clear'))] : [])),
       h('p', { class: 'report__summary' },
         `${plural(reportSessions.length, 'reading session')} · ${answered.length} with answers`),
+
       reportSessions.length
         ? h('ul', { class: 'report__session-list' }, ...reportSessions.map((session) =>
           h('li', {},
+            h('label', { class: 'report__pick' },
+              h('input', Object.assign(
+                { type: 'checkbox', 'aria-label': `Pick the report from ${sessionWhen(session)} to merge`,
+                  onchange: (event) => pickSession(session.id, event.target.checked) },
+                reportPicked.has(session.id) ? { checked: 'checked' } : null))),
             h('button', { class: 'report__session', type: 'button', onclick: () => showReportSession(session.id) },
               h('span', { class: 'report__when' }, timeAgo(Number(session.startedAt) || 0)),
-              h('span', { class: 'report__answers' }, questions
-                ? `${answerCount(session)} of ${plural(questions, 'question')} answered`
-                : plural(answerCount(session), 'answer')),
+              h('span', { class: 'report__answers' },
+                [questions ? `${answerCount(session)} of ${plural(questions, 'question')} answered` : '',
+                  pictures ? `${revealCount(session)} of ${plural(pictures, 'picture')} uncovered` : '']
+                  .filter(Boolean).join(' · ') || 'nothing to answer'),
+              ...(Number(session.mergedFrom) > 1
+                ? [h('span', { class: 'report__merged' }, `${session.mergedFrom} merged`)] : []),
               icon('arrow')),
             h('button', {
               class: 'report__session-remove',
@@ -1307,6 +2098,24 @@
               onclick: () => askToDeleteSession(session),
             }, icon('trash')))))
         : h('p', { class: 'report__empty' }, 'No one has opened this story yet.'));
+  }
+
+  function pickSession(id, on) {
+    if (on) reportPicked.add(id);
+    else reportPicked.delete(id);
+    renderReport(currentStory(), reportSessions);
+  }
+
+  function clearSessionPicks() {
+    reportPicked.clear();
+    renderReport(currentStory(), reportSessions);
+  }
+
+  /** What one entry on a session says: a number and its label, or how long a picture was looked at. */
+  function answerReads(answer) {
+    if (!answer.revealed) return `${answer.value}${answer.label ? ` · ${answer.label}` : ''}`;
+    const seconds = Number(answer.seconds) || 0;
+    return seconds < 1 ? 'Uncovered · a glance' : `Uncovered · ${plural(seconds, 'second')}`;
   }
 
   /** When a reading session started, written out in full. */
@@ -1320,12 +2129,16 @@
   /** One reading session: what the reader answered at each widget, and what that adds up to. */
   function sessionPage(story, session) {
     const widgets = storyWidgets(story);
+    const questions = storyQuestions(story);
+    const pictures = widgets.length - questions.length;
     const started = Number(session.startedAt) || 0;
 
     return h('div', {},
       h('h2', { class: 'report__heading' }, sessionWhen(session)),
       h('p', { class: 'report__summary' },
-        `${timeAgo(started)} · ${answerCount(session)} of ${plural(widgets.length, 'question')} answered`),
+        `${timeAgo(started)} · ${answerCount(session)} of ${plural(questions.length, 'question')} answered`
+        + (pictures ? ` · ${revealCount(session)} of ${plural(pictures, 'picture')} uncovered` : '')
+        + (Number(session.mergedFrom) > 1 ? ` · ${plural(Number(session.mergedFrom), 'reading')} merged into one` : '')),
 
       h('section', { class: 'report__reading' },
         h('h3', { class: 'report__heading' }, 'Summary'),
@@ -1336,11 +2149,12 @@
           const answer = (session.answers ?? {})[widget.id];
           return h('li', { class: 'report__answer' },
             h('span', { class: 'report__answer-text' },
-              h('span', { class: 'report__question' }, widget.question),
+              h('span', { class: 'report__question' }, widgetTitle(widget)),
               h('span', { class: 'report__chapter' }, chapter.title)),
             answer
-              ? h('span', { class: 'report__value' }, `${answer.value}${answer.label ? ` · ${answer.label}` : ''}`)
-              : h('span', { class: 'report__value report__value--none' }, 'Not answered'));
+              ? h('span', { class: 'report__value' }, answerReads(answer))
+              : h('span', { class: 'report__value report__value--none' },
+                widget.type === 'image' ? 'Not uncovered' : 'Not answered'));
         }))
         : h('p', { class: 'report__empty' }, 'This story has no widgets yet.'),
 
@@ -1354,37 +2168,54 @@
    * themselves; no AI is involved.
    */
   function summarise(story, session) {
-    const widgets = storyWidgets(story);
-    if (!widgets.length) return ['This story has no widgets yet, so there was nothing to answer.'];
+    const questions = storyQuestions(story);
+    const pictures = storyWidgets(story).filter(({ widget }) => widget.type === 'image');
+    if (!questions.length && !pictures.length) return ['This story has no widgets yet.'];
 
     const answers = (session.answers ?? {});
-    const answered = widgets
+    const answered = questions
       .map((entry) => ({ ...entry, answer: answers[entry.widget.id] }))
       .filter((entry) => entry.answer && Number(entry.answer.value) >= 1);
-    if (!answered.length) return ['They opened the story but didn’t answer any of the questions.'];
+    const lines = [];
 
-    const values = answered.map((entry) => Number(entry.answer.value));
-    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
-    const named = (entry) => `“${truncate(entry.widget.question, 60)}” at ${entry.answer.value}`
-      + (entry.answer.label ? ` (${entry.answer.label})` : '');
-    const lines = [`They answered ${answered.length} of ${plural(widgets.length, 'question')}, averaging ${average.toFixed(1)} out of 10.`];
+    if (!questions.length) {
+      lines.push('There is nothing to answer in this story — only pictures.');
+    } else if (!answered.length) {
+      lines.push('They opened the story but didn’t answer any of the questions.');
+    } else {
+      const values = answered.map((entry) => Number(entry.answer.value));
+      const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+      const named = (entry) => `“${truncate(entry.widget.question, 60)}” at ${entry.answer.value}`
+        + (entry.answer.label ? ` (${entry.answer.label})` : '');
+      lines.push(`They answered ${answered.length} of ${plural(questions.length, 'question')}, `
+        + `averaging ${average.toFixed(1)} out of 10.`);
 
-    const highest = answered.reduce((best, entry) => (Number(entry.answer.value) > Number(best.answer.value) ? entry : best));
-    const lowest = answered.reduce((worst, entry) => (Number(entry.answer.value) < Number(worst.answer.value) ? entry : worst));
-    if (highest !== lowest) lines.push(`Strongest: ${named(highest)}. Weakest: ${named(lowest)}.`);
+      const highest = answered.reduce((best, entry) => (Number(entry.answer.value) > Number(best.answer.value) ? entry : best));
+      const lowest = answered.reduce((worst, entry) => (Number(entry.answer.value) < Number(worst.answer.value) ? entry : worst));
+      if (highest !== lowest) lines.push(`Strongest: ${named(highest)}. Weakest: ${named(lowest)}.`);
 
-    if (answered.length > 1) {
-      const first = Number(answered[0].answer.value);
-      const last = Number(answered[answered.length - 1].answer.value);
-      lines.push(Math.abs(last - first) >= 2
-        ? `Their answers ${last > first ? 'climbed' : 'fell'} as the story went on, from ${first} to ${last}.`
-        : 'Their answers stayed at about the same level throughout.');
+      if (answered.length > 1) {
+        const first = Number(answered[0].answer.value);
+        const last = Number(answered[answered.length - 1].answer.value);
+        lines.push(Math.abs(last - first) >= 2
+          ? `Their answers ${last > first ? 'climbed' : 'fell'} as the story went on, from ${first} to ${last}.`
+          : 'Their answers stayed at about the same level throughout.');
+      }
+
+      const lastAnswered = questions.reduce((last, entry, index) => (answers[entry.widget.id] ? index : last), -1);
+      if (lastAnswered > -1 && lastAnswered < questions.length - 1) {
+        lines.push(`They stopped after “${truncate(questions[lastAnswered].widget.question, 60)}”, `
+          + `leaving ${plural(questions.length - lastAnswered - 1, 'question')} untouched.`);
+      }
     }
 
-    const lastAnswered = widgets.reduce((last, entry, index) => (answers[entry.widget.id] ? index : last), -1);
-    if (lastAnswered > -1 && lastAnswered < widgets.length - 1) {
-      lines.push(`They stopped after “${truncate(widgets[lastAnswered].widget.question, 60)}”, `
-        + `leaving ${plural(widgets.length - lastAnswered - 1, 'question')} untouched.`);
+    if (pictures.length) {
+      const seen = pictures.map(({ widget }) => answers[widget.id]).filter((one) => one && one.revealed);
+      const looked = seen.reduce((total, one) => total + (Number(one.seconds) || 0), 0);
+      lines.push(seen.length
+        ? `They uncovered ${seen.length} of ${plural(pictures.length, 'picture')}, `
+          + `${looked < 1 ? 'barely pausing over them' : `looking for ${plural(looked, 'second')} in all`}.`
+        : `They left ${pictures.length === 1 ? 'the picture' : `all ${pictures.length} pictures`} covered.`);
     }
 
     const times = answered.map((entry) => Number(entry.answer.answeredAt)).filter(Boolean);
@@ -1437,6 +2268,7 @@
   /** Opens the reading part or the writing part, depending on the code. */
   function openPart(which) {
     part = which;
+    rememberOpenPart();
     ui.logout.hidden = false;
     if (which === 'read') {
       showPicker();
@@ -1454,11 +2286,12 @@
     saveTyping(); // send any chapter text still waiting to be saved
     const gateWasShowing = !ui.gate.hidden; // the story picker lives on the entry screen
     part = null;
+    rememberOpenPart(); // logging out is the one thing that forgets the code
     readingId = null;
     picking = false;
     widgetDraft = null;
-    ui.pickBar.hidden = true;
-    ui.addWidgetFab.hidden = true;
+    closeWidgetDrawer();
+    updateWidgetFab(); // with no part open, every floating button goes
     closeNewStoryForm();
     for (const screen of [ui.welcome, ui.workspace, ui.reader, ui.status, ui.picker, ui.logout]) screen.hidden = true;
 
@@ -1487,6 +2320,7 @@
   // ---------------------------------------------------------------------------
 
   // Stories worth reading: the ones with at least one chapter.
+  // Putting a story aside tidies the writing side only; readers are still offered it.
   const readableStories = () => state.stories.filter((story) => story.chapters.length > 0);
 
   /** Turns the entry screen into the story picker: "Pick your experience" and the list of stories. */
@@ -1577,6 +2411,11 @@
 
   /** Selects a story and shows it on the right. */
   function showStory(id) {
+    closeReport();
+    closeDatabase();
+    closeGallery();
+    closeMoreStories();
+    closeWidgetDrawer();
     state.selectedId = id;
     rememberOpenStory();
     render();
@@ -1586,6 +2425,14 @@
 
   function selectStory(id) {
     if (id !== state.selectedId) showStory(id);
+    // Already on it: this is how you come back from the reports or the database screen.
+    else {
+      closeReport();
+      closeDatabase();
+      closeGallery();
+      closeMoreStories();
+      closeWidgetDrawer();
+    }
   }
 
   /** Adds an empty chapter card whose title can be typed straight away. */
@@ -1633,23 +2480,25 @@
     ui.newStoryButton.hidden = false;
   }
 
-  // What to do if the user confirms the deletion they were asked about.
-  let deleteConfirmed = null;
+  // What to do if the user says yes to what they were asked about.
+  let confirmed = null;
 
-  /** Asks before deleting something that can't be brought back. */
-  function askToDelete({ title, text, confirm, then }) {
-    deleteConfirmed = then;
-    ui.deleteTitle.textContent = title;
-    ui.deleteText.textContent = text;
-    ui.deleteConfirm.textContent = confirm;
-    ui.deleteDialog.returnValue = ''; // closing with Escape keeps the old value, so clear it
-    ui.deleteDialog.showModal();
+  /** Asks before doing something that can't be undone. */
+  function askToConfirm({ title, text, confirm, danger = true, then }) {
+    confirmed = then;
+    ui.confirmTitle.textContent = title;
+    ui.confirmText.textContent = text;
+    ui.confirmButton.textContent = confirm;
+    ui.confirmButton.classList.toggle('btn--danger', danger);
+    ui.confirmButton.classList.toggle('btn--primary', !danger);
+    ui.confirmDialog.returnValue = ''; // closing with Escape keeps the old value, so clear it
+    ui.confirmDialog.showModal();
   }
 
   function askToDeleteStory(id) {
     const story = state.stories.find((candidate) => candidate.id === id);
     const chapters = story.chapters.length;
-    askToDelete({
+    askToConfirm({
       title: `Delete “${story.name}”?`,
       text: chapters
         ? `Its ${plural(chapters, 'chapter')} will be deleted too. This can’t be undone.`
@@ -1663,7 +2512,7 @@
   function askToDeleteSession(session) {
     const started = Number(session.startedAt) || 0;
     const answers = answerCount(session);
-    askToDelete({
+    askToConfirm({
       title: started ? `Delete the report from ${sessionWhen(session)}?` : 'Delete this reading report?',
       text: answers
         ? `Its ${plural(answers, 'answer')} will be deleted too. This can’t be undone.`
@@ -1673,10 +2522,590 @@
     });
   }
 
+  /** Asks before folding several reports into one, since the ones folded in are then gone. */
+  function askToMergeSessions(sessions) {
+    askToConfirm({
+      title: `Merge ${plural(sessions.length, 'reading report')}?`,
+      text: 'They become one report, kept under the earliest of their times. Where more than one '
+        + 'of them answered the same question, the earliest answer is the one kept. This can’t be undone.',
+      confirm: 'Merge reports',
+      danger: false,
+      then: () => mergeSessions(sessions),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // More stories: the ones put aside
+  // ---------------------------------------------------------------------------
+
+  /** Takes a story out of the sidebar and out of the reader's list. Nothing in it is lost. */
+  function putStoryAside(story) {
+    setStoryHidden(story, true);
+    if (story.id === state.selectedId) {
+      ensureSelection();
+      render();
+    } else {
+      renderStoryList();
+    }
+    showNotice(`“${story.name}” is under More stories. Readers can still open it.`);
+  }
+
+  function bringStoryBack(story) {
+    setStoryHidden(story, false);
+    closeMoreStories();
+    showStory(story.id);
+  }
+
+  function openMoreStories() {
+    ui.moreStories.hidden = false;
+    ui.noStory.hidden = true;
+    ui.report.hidden = true;
+    ui.database.hidden = true;
+    ui.gallery.hidden = true;
+    ui.storyHeader.hidden = true;
+    ui.chapterList.hidden = true;
+    ui.firstChapterButton.hidden = true;
+    ui.addChapterButton.hidden = true;
+    renderMoreStories();
+    animateIn(ui.moreStories);
+    ui.moreStories.focus();
+    renderStoryList(); // no story is open, so none should look it
+    updateWidgetFab();
+  }
+
+  function closeMoreStories() {
+    if (ui.moreStories.hidden) return;
+    ui.moreStories.hidden = true;
+    renderStoryList();
+    renderEditor();
+    updateWidgetFab();
+  }
+
+  function renderMoreStories() {
+    const aside = putAside();
+
+    ui.moreStoriesBody.replaceChildren(h('div', {},
+      h('header', { class: 'story-header' },
+        h('h1', { class: 'story-title' }, 'More stories'),
+        h('p', { class: 'story-meta' }, aside.length
+          ? `${plural(aside.length, 'story')} put aside · out of the list on the left, still open to readers`
+          : 'Nothing put aside')),
+
+      aside.length
+        ? h('ul', { class: 'aside-list' }, ...aside.map((story) => h('li', { class: 'aside-item' },
+          h('div', { class: 'aside-text' },
+            h('span', { class: 'aside-name' }, story.name),
+            h('span', { class: 'aside-meta' }, storySummary(story))),
+          h('button', { class: 'btn btn--soft btn--small', type: 'button', onclick: () => bringStoryBack(story) },
+            'Bring it back'),
+          h('button', {
+            class: 'story-action',
+            type: 'button',
+            title: 'Delete story',
+            'aria-label': `Delete “${story.name}”`,
+            onclick: () => askToDeleteStory(story.id),
+          }, icon('trash')))))
+        : h('p', { class: 'report__empty' },
+          'Put a story aside from the list on the left and it waits here until you want it again.')));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Widget gallery: every widget in the library, as a reader meets it
+  // ---------------------------------------------------------------------------
+
+  function openGallery() {
+    ui.gallery.hidden = false;
+    ui.noStory.hidden = true;
+    ui.report.hidden = true;
+    ui.database.hidden = true;
+    ui.moreStories.hidden = true;
+    ui.storyHeader.hidden = true; // the gallery spans every story, so no one story's heading
+    ui.chapterList.hidden = true;
+    ui.firstChapterButton.hidden = true;
+    ui.addChapterButton.hidden = true;
+    renderGallery();
+    animateIn(ui.gallery);
+    ui.gallery.focus();
+    renderStoryList(); // no story is open, so none should look it
+    updateWidgetFab();
+  }
+
+  function closeGallery() {
+    if (ui.gallery.hidden) return;
+    ui.gallery.hidden = true;
+    renderStoryList();
+    renderEditor();
+    updateWidgetFab();
+  }
+
+  function renderGallery() {
+    const inUse = state.stories.flatMap((story) => storyWidgets(story));
+
+    ui.galleryBody.replaceChildren(h('div', {},
+      h('header', { class: 'story-header' },
+        h('h1', { class: 'story-title' }, 'Widget gallery'),
+        h('p', { class: 'story-meta' }, WIDGET_TYPES.length === 1
+          ? 'One kind of widget · shown as a reader meets it'
+          : `${WIDGET_TYPES.length} kinds of widget · shown as a reader meets them`)),
+
+      h('div', { class: 'gallery__grid' },
+        ...WIDGET_TYPES.map((kind) => galleryCard(kind,
+          inUse.filter((entry) => (entry.widget.type || 'scale') === kind.type).length)))));
+  }
+
+  /**
+   * The form you fill in to add this kind of widget — the real one, cloned, so the gallery can't
+   * show something the form doesn't. It is filled with the sample and made inert: a picture of the
+   * form, not a second copy of it.
+   */
+  function previewForm(kind) {
+    const copy = ui.widgetDialog.cloneNode(true);
+    const part = (id) => copy.querySelector(`#${id}`);
+    const image = kind.type === 'image';
+
+    part('widget-dialog-title').textContent = 'Add a widget';
+    part('widget-question').value = kind.sample.question || '';
+    part('widget-labels').replaceChildren(...labelFields(kind.sample.labels));
+    part('widget-image-alt').value = kind.sample.alt || '';
+    part('widget-where').textContent = 'Chapter 1 · “The message lingers in your thoughts, sparking…”';
+    part('widget-error').textContent = '';
+    part('widget-delete').hidden = true;
+
+    part('widget-scale-fields').hidden = image;
+    part('widget-labels-field').hidden = image;
+    part('widget-image-fields').hidden = !image;
+
+    const shot = part('widget-image-preview');
+    shot.hidden = !image;
+    if (image) {
+      shot.replaceChildren(
+        h('img', { class: 'image-preview__img', src: kind.sample.data, alt: '' }),
+        h('p', { class: 'image-preview__note' }, '1400×840 · shrunk to fit · 15.7 KB'));
+    }
+
+    // Ids belong to the real form, and nothing here is to be typed in.
+    copy.querySelectorAll('[id]').forEach((node) => node.removeAttribute('id'));
+    copy.removeAttribute('id');
+    copy.removeAttribute('aria-labelledby');
+    copy.setAttribute('open', '');
+    copy.setAttribute('inert', '');
+    copy.classList.add('gallery__form');
+    return copy;
+  }
+
+  /** The popup as the reader gets it, working but recording nothing. */
+  function previewPopup(kind) {
+    if (kind.type === 'image') {
+      const actions = h('div', { class: 'dialog__actions widget-actions', hidden: 'hidden' });
+      const picture = imageWidget(kind.sample, { onRevealed: () => { actions.hidden = false; } });
+
+      actions.append(h('button', {
+        class: 'btn btn--primary',
+        type: 'button',
+        // In a story this closes the popup; here it covers the picture again for another go.
+        onclick: () => {
+          picture.reset();
+          actions.hidden = true;
+        },
+      }, 'Continue reading'));
+
+      return h('div', { class: 'dialog gallery__popup' },
+        h('div', { class: 'dialog__body' },
+          h('h2', { class: 'dialog__title' }, kind.sample.alt),
+          picture,
+          actions));
+    }
+
+    const actions = h('div', { class: 'dialog__actions widget-actions', hidden: 'hidden' });
+    const scale = scaleWidget(kind.sample.labels, { onHold: () => { actions.hidden = false; } });
+
+    actions.append(h('button', {
+      class: 'btn btn--primary',
+      type: 'button',
+      // In a story this closes the popup; here it puts the sample back for another go.
+      onclick: () => {
+        scale.reset();
+        actions.hidden = true;
+      },
+    }, 'Continue reading'));
+
+    return h('div', { class: 'dialog gallery__popup' },
+      h('div', { class: 'dialog__body' },
+        h('h2', { class: 'dialog__title' }, kind.sample.question),
+        scale,
+        actions));
+  }
+
+  function galleryCard(kind, used) {
+    return h('article', { class: 'gallery__card' },
+      h('h2', { class: 'gallery__name' }, kind.name),
+      h('p', { class: 'gallery__about' }, kind.about),
+
+      h('p', { class: 'gallery__preview-label' }, 'As the reader sees it'),
+      h('div', { class: 'gallery__stage' }, previewPopup(kind)),
+
+      h('p', { class: 'gallery__preview-label' }, 'As you set it up'),
+      h('div', { class: 'gallery__stage gallery__stage--form' }, previewForm(kind)),
+
+      h('p', { class: 'gallery__note' }, used
+        ? `${used === 1 ? 'Used once' : `Used ${used} times`} across your stories`
+        : 'Not used in any story yet'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Manage database: what Firestore is actually holding
+  // ---------------------------------------------------------------------------
+
+  const COLLECTIONS = ['stories', 'sessions', 'images'];
+
+  // Which Firebase project to talk to. The one in this file is the default; anything saved on the
+  // "Manage database" screen overrides it, and stays on this device only.
+  const CONFIG_KEY = 'interactive-stories:firebase-config';
+  const CONFIG_FIELDS = [
+    { key: 'projectId', label: 'Project ID', used: true },
+    { key: 'apiKey', label: 'API key', used: true },
+    { key: 'authDomain', label: 'Auth domain' },
+    { key: 'storageBucket', label: 'Storage bucket' },
+    { key: 'messagingSenderId', label: 'Messaging sender ID' },
+    { key: 'appId', label: 'App ID' },
+  ];
+
+  function readConfig() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CONFIG_KEY) || 'null');
+      return saved ? { ...firebaseConfig, ...saved } : { ...firebaseConfig };
+    } catch (error) {
+      return { ...firebaseConfig };
+    }
+  }
+
+  const usingDefaultConfig = () => {
+    try {
+      return !localStorage.getItem(CONFIG_KEY);
+    } catch (error) {
+      return true;
+    }
+  };
+
+  /** Points the app at a project and starts listening to it. Used at startup and on every change. */
+  function connectTo(config) {
+    if (storiesWatch) storiesWatch();
+    storiesWatch = null;
+    activeConfig = config;
+    loaded = false;
+    state.stories = [];
+    firestore = window.FirestoreRest({ projectId: config.projectId, apiKey: config.apiKey });
+    db = firestore.initializeFirestore();
+    listenForStories();
+  }
+
+  function saveConfig(values) {
+    const config = { ...firebaseConfig, ...values };
+    if (!config.projectId.trim() || !config.apiKey.trim()) {
+      showNotice('A project ID and an API key are both needed to reach a database.');
+      return;
+    }
+    try {
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(values));
+    } catch (error) {
+      showNotice('This browser wouldn’t save the settings, so the change lasts until you reload.', { keep: true });
+    }
+    connectTo(config);
+    ui.databaseBody.replaceChildren(h('p', { class: 'report__empty' }, `Connecting to ${config.projectId}…`));
+    refreshDatabase();
+  }
+
+  function resetConfig() {
+    try {
+      localStorage.removeItem(CONFIG_KEY);
+    } catch (error) { /* nothing saved to begin with */ }
+    ui.status.classList.remove('is-error');
+    ui.statusReset.hidden = true;
+    ui.statusText.textContent = 'Loading your stories…';
+    connectTo({ ...firebaseConfig });
+    if (!ui.database.hidden) refreshDatabase();
+  }
+
+  /** The project this app is pointed at, and the fields to point it somewhere else. */
+  function connectionSection() {
+    const inputs = new Map();
+    const form = h('form', {
+      class: 'db__config',
+      onsubmit: (event) => {
+        event.preventDefault();
+        saveConfig(Object.fromEntries([...inputs].map(([key, input]) => [key, input.value.trim()])));
+      },
+    });
+
+    for (const field of CONFIG_FIELDS) {
+      const input = h('input', {
+        class: 'field__input',
+        type: 'text',
+        autocomplete: 'off',
+        spellcheck: 'false',
+        id: `config-${field.key}`,
+        value: activeConfig[field.key] || '',
+      });
+      inputs.set(field.key, input);
+      form.append(h('label', { class: 'db__config-field' },
+        h('span', { class: 'field__label' }, field.label,
+          ...(field.used ? [h('span', { class: 'db__used' }, 'used')] : [])),
+        input));
+    }
+
+    form.append(h('div', { class: 'db__config-actions' },
+      h('button', { class: 'btn btn--primary btn--small', type: 'submit' }, 'Save and reconnect'),
+      ...(usingDefaultConfig()
+        ? []
+        : [h('button', { class: 'btn btn--ghost btn--small', type: 'button', onclick: resetConfig }, 'Back to the built-in one')])));
+
+    return h('section', { class: 'db__collection' },
+      h('h3', { class: 'db__collection-name' }, 'Connection',
+        h('span', { class: 'db__count' }, usingDefaultConfig() ? 'built into this app' : 'saved on this device')),
+      h('p', { class: 'db__note' },
+        'Only the project ID and API key are used to reach Firestore; the rest are kept so a whole '
+        + 'firebaseConfig can live here. Changes apply straight away and stay in this browser.'),
+      form);
+  }
+
+  function openDatabase() {
+    ui.database.hidden = false;
+    ui.noStory.hidden = true;
+    ui.report.hidden = true;
+    // The database is not about one story, so the story's own heading has no place above it.
+    ui.gallery.hidden = true;
+    ui.moreStories.hidden = true;
+    ui.storyHeader.hidden = true;
+    ui.chapterList.hidden = true;
+    renderStoryList(); // no story is open now, so none should look it
+    ui.firstChapterButton.hidden = true;
+    ui.addChapterButton.hidden = true;
+    ui.databaseBody.replaceChildren(h('p', { class: 'report__empty' }, 'Reading the database…'));
+    animateIn(ui.database);
+    ui.database.focus();
+    updateWidgetFab();
+    refreshDatabase();
+  }
+
+  function closeDatabase() {
+    if (ui.database.hidden) return;
+    ui.database.hidden = true;
+    renderStoryList();
+    renderEditor();
+    updateWidgetFab();
+  }
+
+  // Reads can come back in a different order than they were asked for — switching projects starts a
+  // second one while the first is still out — so only the newest is allowed to draw.
+  let newestRead = 0;
+
+  async function refreshDatabase() {
+    const read = ++newestRead;
+    try {
+      const data = await firestore.inspect(COLLECTIONS);
+      if (read !== newestRead || ui.database.hidden) return;
+      ui.databaseBody.replaceChildren(databasePage(data));
+    } catch (error) {
+      if (read !== newestRead) return;
+      ui.databaseBody.replaceChildren(h('p', { class: 'report__empty' }, `Couldn’t read the database. ${explain(error)}`));
+    }
+  }
+
+  /** The whole database on one page: every collection, every document, every field. */
+  function databasePage(data) {
+    const documents = data.collections.reduce((total, one) => total + one.documents.length, 0);
+    const bytes = data.collections.reduce((total, one) =>
+      total + one.documents.reduce((sum, document) => sum + document.bytes, 0), 0);
+    const unreadable = data.collections.filter((one) => one.error);
+
+    return h('div', {},
+      // Set like a story's own heading, and in its place, since it is this page's title.
+      h('header', { class: 'story-header' },
+        h('h1', { class: 'story-title' }, 'Database'),
+        h('p', { class: 'story-meta' }, unreadable.length
+          // An unreachable project must never be mistaken for an empty one.
+          ? `${data.projectId} · couldn’t be read`
+          : `${data.projectId} · ${plural(data.collections.length, 'collection')} · `
+            + `${plural(documents, 'document')} · ${formatBytes(bytes)}`)),
+      ...(unreadable.length ? [h('p', { class: 'db__error' },
+        `Firestore wouldn’t answer for “${data.projectId}”. ${unreadable[0].error} `
+        + 'Nothing has been deleted — check the project ID and API key below.')] : []),
+
+      connectionSection(),
+
+      h('p', { class: 'db__tools' },
+        h('button', { class: 'btn btn--soft btn--small', type: 'button', onclick: refreshDatabase }, 'Refresh'),
+        h('button', { class: 'btn btn--soft btn--small', type: 'button', onclick: () => downloadBackup(data) },
+          'Download a copy')),
+
+      ...data.collections.map((one) => h('section', { class: 'db__collection' },
+        h('h3', { class: 'db__collection-name' },
+          one.name,
+          h('span', { class: 'db__count' }, one.error ? 'couldn’t be read' : plural(one.documents.length, 'document'))),
+        one.error
+          ? h('p', { class: 'db__error' }, one.error)
+          : one.documents.length
+          // Oldest first, so a refresh never reshuffles the list either.
+          ? h('ul', { class: 'db__docs' }, ...[...one.documents]
+            .sort((a, b) => (a.createTime < b.createTime ? -1 : a.createTime > b.createTime ? 1 : 0))
+            .map((document) => documentCard(one.name, document)))
+            : h('p', { class: 'report__empty' }, 'Empty.'))),
+
+      h('section', { class: 'db__danger' },
+        h('h3', { class: 'db__collection-name' }, 'Danger zone'),
+        h('p', { class: 'db__note' },
+          'Deleting everything empties both collections. A copy is saved to your downloads first.'),
+        h('button', { class: 'btn btn--ghost report__delete', type: 'button', onclick: askToWipeDatabase },
+          icon('trash'), 'Delete everything')));
+  }
+
+  /** One document: its id, when it was written, and its fields laid open. */
+  function documentCard(collection, document) {
+    return h('li', { class: 'db__doc' },
+      h('div', { class: 'db__doc-head' },
+        h('code', { class: 'db__id' }, document.id),
+        h('span', { class: 'db__meta' },
+          `${formatBytes(document.bytes)} · written ${new Date(document.updateTime).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}`),
+        h('button', {
+          class: 'db__delete',
+          type: 'button',
+          title: 'Delete this document',
+          'aria-label': `Delete ${collection}/${document.id}`,
+          onclick: () => askToDeleteDocument(collection, document),
+        }, icon('trash'))),
+      fieldTree(document.fields));
+  }
+
+  /** Fields, nested as deeply as they go. Long text is shortened but its full length is shown. */
+  function fieldTree(value) {
+    if (value === null || value === undefined) return h('span', { class: 'db__null' }, 'null');
+    if (typeof value === 'string') {
+      const long = value.length > 160;
+      return h('span', Object.assign({ class: 'db__string' }, long ? { title: value } : null),
+        `“${truncate(value.replace(/\n+/g, ' ⏎ '), 160)}”`,
+        ...(long ? [h('span', { class: 'db__len' }, ` ${plural(value.length, 'char')}`)] : []));
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return h('span', { class: 'db__number' }, String(value));
+    }
+    if (Array.isArray(value)) {
+      if (!value.length) return h('span', { class: 'db__null' }, 'empty list');
+      return h('ul', { class: 'db__fields' }, ...value.map((item, index) =>
+        h('li', {}, h('span', { class: 'db__key' }, `${index}`), fieldTree(item))));
+    }
+    const keys = orderedKeys(value);
+    if (!keys.length) return h('span', { class: 'db__null' }, 'empty');
+    return h('ul', { class: 'db__fields' }, ...keys.map((key) =>
+      h('li', {}, h('span', { class: 'db__key' }, key), fieldTree(value[key]))));
+  }
+
+  // Firestore hands back the fields of a map in a different order on every call, which made this
+  // screen look like it was changing when nothing had. Put them in an order of our own instead.
+  const STAMPS = ['createdAt', 'startedAt', 'answeredAt'];
+
+  function orderedKeys(object) {
+    const keys = Object.keys(object).sort();
+    const isRecord = (key) => object[key] && typeof object[key] === 'object' && !Array.isArray(object[key]);
+    // Chapters, widgets and answers are keyed by random id, so show them oldest first instead.
+    const stamp = STAMPS.find((name) => keys.length > 1
+      && keys.every((key) => isRecord(key) && Number.isFinite(Number(object[key][name]))));
+    return stamp ? keys.sort((a, b) => Number(object[a][stamp]) - Number(object[b][stamp])) : keys;
+  }
+
+  const formatBytes = (bytes) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`);
+
+  function askToDeleteDocument(collection, document) {
+    askToConfirm({
+      title: `Delete ${collection}/${document.id}?`,
+      text: 'This removes the document and everything in it. This can’t be undone.',
+      confirm: 'Delete document',
+      then: async () => {
+        try {
+          await firestore.deleteDoc(firestore.doc(db, collection, document.id));
+        } catch (error) {
+          showNotice(`Couldn’t delete it. ${explain(error)}`, { keep: true });
+        }
+        refreshDatabase();
+      },
+    });
+  }
+
+  /**
+   * Empties the database: every story and every reading report. A copy of all of it goes to the
+   * browser's downloads first, because nothing here can be undone once it is gone.
+   */
+  async function wipeDatabase() {
+    let sessions = [];
+    let images = [];
+    try {
+      sessions = (await firestore.getDocs(firestore.collection(db, 'sessions'))).docs;
+      images = (await firestore.getDocs(firestore.collection(db, 'images'))).docs;
+    } catch (error) {
+      showNotice(`Couldn’t read the whole database, so nothing was deleted. ${explain(error)}`, { keep: true });
+      return;
+    }
+
+    downloadBackup({
+      exportedAt: new Date().toISOString(),
+      stories: state.stories,
+      sessions: sessions.map((entry) => ({ id: entry.id, ...entry.data() })),
+      images: images.map((entry) => ({ id: entry.id, ...entry.data() })),
+    });
+
+    const gone = [
+      ...state.stories.map((story) => firestore.deleteDoc(storyRef(story.id))),
+      ...sessions.map((entry) => firestore.deleteDoc(firestore.doc(db, 'sessions', entry.id))),
+      ...images.map((entry) => firestore.deleteDoc(firestore.doc(db, 'images', entry.id))),
+    ];
+    imagesSeen.clear();
+    state.stories = [];
+    state.selectedId = null;
+    rememberOpenStory();
+    closeReport();
+    render();
+    try {
+      await Promise.all(gone);
+    } catch (error) {
+      showNotice(`Some of it couldn’t be deleted. ${explain(error)}`, { keep: true });
+    }
+  }
+
+  /** Hands the whole database to the browser as a file, so a wipe is never the end of it. */
+  function downloadBackup(data) {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const link = h('a', { href: url, download: `interactive-stories-backup-${stamp}.json` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  function askToWipeDatabase() {
+    const stories = state.stories.length;
+    const words = state.stories.reduce((total, story) =>
+      total + story.chapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0), 0);
+    askToConfirm({
+      title: 'Delete everything?',
+      text: `This deletes ${plural(stories, 'story')} — ${plural(words, 'word')} of writing — every `
+        + 'reading report and every picture, for good. A copy is saved to your downloads first. '
+        + 'This can’t be undone.',
+      confirm: 'Delete everything',
+      then: wipeDatabase,
+    });
+  }
+
   /** Removes a story. With no stories left, the welcome screen comes back. */
   function deleteStory(id) {
     const index = state.stories.findIndex((story) => story.id === id);
     if (index === -1) return; // already deleted, e.g. on another device
+    const wasOpen = id === state.selectedId;
+    // Where it sat in the sidebar, which holds only the stories on show.
+    const row = openStories().findIndex((story) => story.id === id);
+    // The pictures its widgets point at belong to nothing once the story is gone.
+    for (const { widget } of storyWidgets(state.stories[index])) {
+      if (widget.type === 'image') forgetImage(widget.imageId);
+    }
     state.stories.splice(index, 1);
     save(firestore.deleteDoc(storyRef(id)));
 
@@ -1685,19 +3114,28 @@
       return;
     }
 
-    if (id === state.selectedId) {
-      // Open the story that moved into its place (or the one above it).
-      showStory((state.stories[index] || state.stories[index - 1]).id);
+    if (wasOpen) {
+      // Open the story that took its place in the list, or the one above it. Never one put aside.
+      const shown = openStories();
+      state.selectedId = shown.length ? shown[Math.min(row, shown.length - 1)].id : null;
+      rememberOpenStory();
+      render();
     } else {
       renderStoryList();
     }
+
     // Keep keyboard focus in the list, where the deleted story was.
-    ui.storyList.children[Math.min(index, state.stories.length - 1)].firstElementChild.focus();
+    const next = ui.storyList.children[Math.min(Math.max(row, 0), ui.storyList.children.length - 1)];
+    if (next) next.firstElementChild.focus();
   }
 
   // ---------------------------------------------------------------------------
   // Events
   // ---------------------------------------------------------------------------
+
+  // The stories are asked for before anything below is wired up: whatever else goes wrong on the
+  // page, it must never be the reason they don't arrive.
+  start();
 
   // Entry screen: the 6-digit code is checked as soon as the last digit is typed.
   ui.codeInput.addEventListener('input', () => {
@@ -1719,7 +3157,15 @@
   ui.codeInput.addEventListener('focus', caretToEnd);
   ui.codeInput.addEventListener('click', caretToEnd);
 
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !ui.widgetDrawer.hidden) closeWidgetDrawer();
+  });
+
   ui.logout.addEventListener('click', logOut);
+  ui.statusReset.addEventListener('click', resetConfig);
+  ui.moreStoriesButton.addEventListener('click', openMoreStories);
+  ui.galleryButton.addEventListener('click', openGallery);
+  ui.manageButton.addEventListener('click', openDatabase);
 
   // Reading part
   ui.readerBack.addEventListener('click', closeReader);
@@ -1777,17 +3223,27 @@
   ui.addChapterButton.addEventListener('click', startNewChapter);
 
   // Widgets
-  ui.addWidgetFab.addEventListener('click', () => {
-    const story = currentStory();
-    if (!story) return;
-    if (!story.chapters.some((chapter) => contentLines(chapter.content).length)) {
-      showNotice('Write some text in a chapter first, then pick the line where the widget appears.');
-      return;
-    }
-    startLinePicking({ story, chapter: null, widget: null, line: 0, question: '', labels: [] });
-  });
+  ui.addWidgetFab.addEventListener('click', startNewWidget);
+
+  ui.widgetCountFab.addEventListener('click', toggleWidgetDrawer);
+  ui.widgetDrawerClose.addEventListener('click', closeWidgetDrawer);
+  ui.widgetDrawerClear.addEventListener('click', askToRemoveAllWidgets);
 
   ui.pickCancel.addEventListener('click', cancelLinePicking);
+
+  ui.kindCancel.addEventListener('click', () => ui.kindDialog.close());
+  ui.kindDialog.addEventListener('close', () => {
+    const kind = WIDGET_TYPES.find((one) => one.type === ui.kindDialog.returnValue);
+    if (!kind || !widgetDraft) {
+      widgetDraft = null; // cancelled, or closed with Escape
+      return;
+    }
+    widgetDraft.type = kind.type;
+    widgetDraft.kindChosen = true;
+    showWidgetDialog(widgetDraft);
+  });
+
+  ui.widgetImageFile.addEventListener('change', (event) => pickImage(event.target.files[0]));
 
   ui.widgetChangeLine.addEventListener('click', () => {
     if (!widgetDraft) return;
@@ -1811,7 +3267,13 @@
 
   ui.popupClose.addEventListener('click', () => ui.widgetPopup.close());
   ui.widgetPopup.addEventListener('close', () => {
+    const entry = openWidgetEntry;
     openWidgetEntry = null;
+    // A picture that was uncovered: note it, and how long they looked before moving on.
+    if (entry && entry.widget.type === 'image' && revealedAt) {
+      recordReveal(entry.chapter, entry.widget, Math.round((Date.now() - revealedAt) / 1000));
+    }
+    revealedAt = 0;
     showNextWidget(); // any widget that came up while this one was open
   });
 
@@ -1820,20 +3282,18 @@
   ui.reportBack.addEventListener('click', () => (reportSession ? showReportList() : closeReport()));
 
   // Delete confirmation
-  ui.deleteDialog.addEventListener('close', () => {
-    const confirmed = deleteConfirmed;
-    deleteConfirmed = null;
-    if (ui.deleteDialog.returnValue === 'delete' && confirmed) confirmed();
+  ui.confirmDialog.addEventListener('close', () => {
+    const go = confirmed;
+    confirmed = null;
+    if (ui.confirmDialog.returnValue === 'delete' && go) go();
   });
 
   // A click on the dialog element itself (not its form) is a click on the dimmed backdrop: cancel.
-  ui.deleteDialog.addEventListener('click', (event) => {
-    if (event.target === ui.deleteDialog) ui.deleteDialog.close();
+  ui.confirmDialog.addEventListener('click', (event) => {
+    if (event.target === ui.confirmDialog) ui.confirmDialog.close();
   });
 
-  ui.noticeClose.addEventListener('click', () => {
-    ui.notice.hidden = true;
-  });
+  ui.noticeClose.addEventListener('click', hideNotice);
 
   // Widgets pop up as the reader scrolls their spot into the top third of the screen.
   window.addEventListener('scroll', onReaderScroll, { passive: true });
@@ -1857,8 +3317,10 @@
     if (document.visibilityState === 'hidden') saveTyping();
   });
 
-  // The entry screen shows first; the stories load in the background meanwhile.
+  // The entry screen shows first; the stories load in the background meanwhile. Unless the last
+  // visit ended without logging out, in which case carry straight on where it left off.
   updateCodeCells();
-  ui.codeInput.focus();
-  start();
+  const reopen = readOpenPart();
+  if (reopen) openPart(reopen);
+  else ui.codeInput.focus();
 })();

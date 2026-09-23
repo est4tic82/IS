@@ -21,6 +21,8 @@
   --danger-text: #b42318;
   --shadow: 0 1px 2px rgb(64 42 20 / 0.05), 0 10px 30px -18px rgb(64 42 20 / 0.35);
 
+  --drawer-w: 380px; /* the widget drawer, and how much room the page gives it */
+
   --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
@@ -210,9 +212,10 @@ button {
   background: var(--danger-hover);
 }
 
-/* Small outlined buttons: "All stories" in the reader and "Log out" */
+/* Small outlined buttons: "All stories" in the reader, "Log out", "Remove all" */
 .reader__back,
-.logout {
+.logout,
+.drawer__clear {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -231,12 +234,25 @@ button {
   border-color: var(--accent);
 }
 
+/* Same button, but what it does is worth a warning colour. No icon, so the padding is even. */
+.drawer__clear {
+  flex: none;
+  padding-left: 14px;
+}
+
+.drawer__clear:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
 /* Sits in the top-right corner of every screen once a code has been entered. */
 .logout {
   position: absolute;
   top: 24px;
   right: 24px;
   z-index: 5;
+  transition: color 0.15s ease, border-color 0.15s ease, right 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
 .shake {
@@ -513,6 +529,23 @@ button {
   grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100vh;
   min-height: 100dvh;
+  transition: padding-right 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* With the drawer out, the page ends where the drawer begins, so the story re-centres in what is
+   left rather than hiding behind it. Too narrow for that and the drawer simply covers the page. */
+@media (min-width: 900px) {
+  body.has-drawer .workspace {
+    padding-right: var(--drawer-w);
+  }
+
+  body.has-drawer .fab-stack {
+    right: calc(var(--drawer-w) + 28px);
+  }
+
+  body.has-drawer .logout {
+    right: calc(var(--drawer-w) + 24px);
+  }
 }
 
 /* Sidebar ------------------------------------------------------------------ */
@@ -552,20 +585,28 @@ button {
 }
 
 .story-list li {
-  position: relative;
+  position: relative; /* the row's two action buttons sit over its right end */
 }
 
+/* At rest the name gets nearly the whole row; it gives way only when the two action buttons are
+   there to be reached, so a long name isn't cut short for icons that aren't showing. */
 .story-link {
   position: relative;
   display: grid;
   gap: 1px;
   width: 100%;
-  padding: 10px 44px 10px 16px; /* room on the right for the delete button */
+  padding: 10px 16px;
   text-align: left;
   background: transparent;
   border: 0;
   border-radius: 10px;
-  transition: background-color 0.15s ease;
+  transition: background-color 0.15s ease, padding-right 0.15s ease;
+}
+
+.story-list li:hover .story-link,
+.story-list li:focus-within .story-link,
+.story-link[aria-current="true"] {
+  padding-right: 70px; /* two 28px buttons, their gap, and the 6px they sit in from the edge */
 }
 
 .story-link:hover {
@@ -604,11 +645,176 @@ button {
   color: var(--muted);
 }
 
-.story-delete {
+.story-actions {
   position: absolute;
   top: 50%;
-  right: 8px;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s ease;
+}
+
+.story-action {
   display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.story-action .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* Visible on the open story, on hover and on keyboard focus (always on touch screens, below). */
+.story-link[aria-current="true"] + .story-actions,
+.story-list li:hover .story-actions,
+.story-actions:focus-within {
+  opacity: 1;
+}
+
+.story-action:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.story-action:last-child:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+/* Nothing to hover on a touch screen, so the buttons are always there and always have their room. */
+@media (hover: none) {
+  .story-actions {
+    opacity: 1;
+  }
+
+  .story-link {
+    padding-right: 70px;
+  }
+}
+
+/* The database screen
+   ========================================================================== */
+
+/* Which Firebase project the app is pointed at */
+.db__config {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.db__config-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.db__config .field__input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+}
+
+.db__used {
+  margin-left: 8px;
+  padding: 2px 7px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+.db__config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  grid-column: 1 / -1;
+  margin-top: 4px;
+}
+
+.db__tools {
+  display: flex;
+  gap: 10px;
+  margin: 18px 0 26px;
+}
+
+.db__collection {
+  margin-bottom: 28px;
+}
+
+.db__collection-name {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 12px;
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.db__count {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.db__docs {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.db__doc {
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.db__doc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.db__id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+}
+
+.db__meta {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.db__delete {
+  display: grid;
+  flex: none;
   place-items: center;
   width: 30px;
   height: 30px;
@@ -617,32 +823,124 @@ button {
   background: transparent;
   border: 0;
   border-radius: 8px;
-  opacity: 0;
-  transform: translateY(-50%);
-  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease;
 }
 
-.story-delete .icon {
-  width: 16px;
-  height: 16px;
-}
-
-/* Visible on the open story, on hover and on keyboard focus (always on touch screens, below). */
-.story-link[aria-current="true"] + .story-delete,
-.story-list li:hover .story-delete,
-.story-delete:focus-visible {
-  opacity: 1;
-}
-
-.story-delete:hover {
+.db__delete:hover {
   color: var(--danger-text);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
-@media (hover: none) {
-  .story-delete {
-    opacity: 1;
-  }
+.db__delete .icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* The fields themselves, nested as deep as they go */
+.db__fields {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 1px solid var(--line);
+  list-style: none;
+}
+
+.db__doc > .db__fields {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.db__fields li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.db__fields li > .db__fields {
+  flex-basis: 100%;
+}
+
+.db__key {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--accent-text);
+}
+
+.db__string {
+  min-width: 0;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.db__number {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.db__null,
+.db__len {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.db__danger {
+  margin-top: 34px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+
+.db__error {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  font-size: 0.88rem;
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-radius: 12px;
+}
+
+.db__note {
+  margin: 0 0 14px;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+/* Opens the database screen. Kept quiet at the foot of the sidebar. */
+.manage-db {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.manage-db .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.manage-db + .manage-db {
+  margin-top: 2px;
+}
+
+.manage-db:hover,
+.manage-db:focus-visible {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .new-story-btn {
@@ -852,6 +1150,7 @@ button {
   outline: none;
 }
 
+.story-title-btn,
 .chapter__title-btn {
   padding: 0;
   font: inherit;
@@ -863,6 +1162,7 @@ button {
   cursor: text;
 }
 
+.story-title-btn .icon,
 .chapter__title-btn .icon {
   width: 20px;
   height: 20px;
@@ -873,9 +1173,32 @@ button {
   transition: opacity 0.15s ease;
 }
 
+.story-title-btn:hover .icon,
+.story-title-btn:focus-visible .icon,
 .chapter__title-btn:hover .icon,
 .chapter__title-btn:focus-visible .icon {
   opacity: 1;
+}
+
+/* The story's own name, set as its heading */
+.story-title-input {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0 0 4px;
+  font: inherit;
+  letter-spacing: inherit;
+  overflow-wrap: anywhere;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid var(--accent);
+  border-radius: 0;
+  outline: none;
+}
+
+.story-title-btn .icon {
+  margin-left: 14px;
+  vertical-align: 0.06em;
 }
 
 .chapter__hint {
@@ -951,92 +1274,23 @@ button {
   color: var(--accent);
 }
 
-.chapter__widgets {
-  margin-top: 22px;
-  padding-top: 20px;
-  border-top: 1px solid var(--line);
-}
-
-.widget-list {
-  display: grid;
-  gap: 8px;
-  margin: 0 0 12px;
-  padding: 0;
-  list-style: none;
-}
-
-.widget-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.widget-row__open {
-  display: grid;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-  padding: 10px 14px;
-  text-align: left;
-  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
-  border: 1px solid transparent;
-  border-radius: 12px;
-  transition: border-color 0.15s ease;
-}
-
-.widget-row__open:hover {
-  border-color: var(--accent);
-}
-
-.widget-row__question {
-  font-size: 0.95rem;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.widget-row__where {
-  overflow: hidden;
-  font-size: 0.8rem;
-  color: var(--muted);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.widget-row__remove {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  color: var(--muted);
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-}
-
-.widget-row__remove:hover {
-  color: var(--danger-text);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-}
-
-.widget-row__remove .icon {
-  width: 16px;
-  height: 16px;
-}
-
-.chapter__widgets:empty {
-  display: none;
-}
-
 /* The floating button that starts a widget, and the bar shown while a line is being picked */
-.fab {
+.fab-stack {
   position: fixed;
   right: 28px;
   bottom: 28px;
   z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch; /* both buttons take the width of the wider one */
+  gap: 10px;
+  transition: right 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.fab {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   padding: 14px 22px 14px 18px;
   font-size: 0.95rem;
@@ -1054,25 +1308,50 @@ button {
   transform: translateY(-1px);
 }
 
+/* The slot keeps its size whichever of the two is showing, so the stack never changes width. */
+.fab-slot {
+  position: relative;
+}
+
+.fab-slot > .fab {
+  width: 100%;
+}
+
+/* Laid over the button it replaces, so Cancel lands on exactly the same spot. */
 .pick-bar {
-  position: fixed;
+  position: absolute;
+  inset: 0;
+  animation: rise 0.25s ease;
+}
+
+.pick-bar .fab {
+  width: 100%;
+  height: 100%;
+}
+
+/* Out of sight while a line is being picked, but still holding the slot open. */
+.fab--standby {
+  visibility: hidden;
+}
+
+/* Sits above the button, matching it in width and shape. Being out of flow, it leaves the width
+   of the stack to the buttons themselves. */
+.pick-bar__hint {
+  position: absolute;
   right: 0;
-  bottom: 28px;
+  bottom: calc(100% + 10px);
   left: 0;
-  z-index: 8;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  width: fit-content;
-  max-width: calc(100vw - 32px);
-  margin: 0 auto;
-  padding: 12px 12px 12px 20px;
+  padding: 16px 22px;
+  font-size: 0.85rem;
+  line-height: 1.35;
   color: var(--ink);
+  text-align: center;
   background: var(--surface);
   border: 1px solid var(--accent);
-  border-radius: 999px;
+  /* Not 999px: a pill's corners grow with its height, and this box is taller than the buttons, so
+     it would look far rounder than them. 26px is what their pill radius comes to at their height. */
+  border-radius: 26px;
   box-shadow: 0 14px 30px -12px rgb(0 0 0 / 0.4);
-  animation: rise 0.25s ease;
 }
 
 /* The chapter's text, set exactly as the editing box and the reader set it, so rows line up everywhere */
@@ -1244,39 +1523,129 @@ button {
 /* The popup readers see
    ========================================================================== */
 
-.widget-popup__label {
-  margin-top: 10px;
+/* The 1-to-10 scale: a slider, with the number it rests on and that number's label above it */
+.scale {
+  margin-top: 24px; /* the bar sits just under the question until the reading opens above it */
+}
+
+/* The reading opens above the slider and the button below it, and both take exactly the same room
+   (--widget-grow). A modal is centred, so growing by the same amount top and bottom leaves the
+   slider itself untouched while the popup opens out around it. */
+:root {
+  --widget-grow: 84px;
+}
+
+/* The label sits above the number, both centred. Its height is fixed so a number without a label
+   opens the popup by just as much as one with. */
+.scale__readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  height: 64px;
+  margin: 0 0 20px; /* 64 + 20 = --widget-grow */
+  overflow: hidden;
   font-family: var(--font-display);
-  font-size: 1.15rem;
+  text-align: center;
+  animation: widget-readout-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes widget-readout-in {
+  from {
+    height: 0;
+    margin-bottom: 0;
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    height: 64px;
+    margin-bottom: 20px;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.scale__value {
+  font-size: 1.9rem;
+  font-weight: 500;
+  line-height: 1;
   color: var(--accent-text);
 }
 
-.scale {
-  display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 22px;
+.scale__label {
+  font-size: 1.5rem;
+  line-height: 1.2;
+  color: var(--accent-text);
 }
 
-.scale__number {
-  padding: 12px 0;
-  font-weight: 600;
-  color: var(--ink);
-  background: var(--bg);
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+.scale__slider {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  accent-color: var(--accent); /* in case the parts below aren't understood */
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
 }
 
-.scale__number:hover {
-  border-color: var(--accent);
+.scale__slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
 }
 
-.scale__number.is-picked {
-  color: var(--on-accent);
+.scale__slider::-webkit-slider-runnable-track {
+  height: 6px;
+  background: linear-gradient(to right, var(--line-strong), var(--accent));
+  border-radius: 999px;
+}
+
+.scale__slider::-moz-range-track {
+  height: 6px;
+  background: linear-gradient(to right, var(--line-strong), var(--accent));
+  border-radius: 999px;
+}
+
+/* The same handle as the one on a picture: 30px across, hollow until it is used. */
+.scale__slider::-webkit-slider-thumb {
+  width: 30px;
+  height: 30px;
+  margin-top: -12px; /* centres the handle on the 6px track */
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 2px 10px -2px rgb(0 0 0 / 0.4);
+  -webkit-appearance: none;
+  appearance: none;
+  transition: transform 0.12s ease;
+}
+
+.scale__slider::-moz-range-thumb {
+  width: 30px;
+  height: 30px;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 2px 10px -2px rgb(0 0 0 / 0.4);
+}
+
+/* Filled in once it has been taken hold of, so an untouched slider doesn't look like an answer. */
+.scale__slider.is-set::-webkit-slider-thumb {
   background: var(--accent);
-  border-color: var(--accent);
 }
+
+.scale__slider.is-set::-moz-range-thumb {
+  background: var(--accent);
+}
+
+.scale__slider:active::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+
 /* The reading report
    ========================================================================== */
 
@@ -1324,15 +1693,69 @@ button {
   list-style: none;
 }
 
+/* The heading line, with the merge controls sharing it */
+.report__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* Ticking two or more reports folds them into one */
+.report__merge {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.report__merge-count {
+  font-size: 0.9rem;
+  color: var(--accent-text);
+}
+
 .report__session-list li {
   position: relative; /* the delete button sits over the right end of the card */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.report__pick {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.report__pick input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* How many readings a merged report holds */
+.report__merged {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-radius: 999px;
 }
 
 .report__session {
   display: flex;
+  flex: 1;
+  min-width: 0;
   align-items: center;
   gap: 16px;
-  width: 100%;
   padding: 16px 54px 16px 20px;
   text-align: left;
   background: var(--surface);
@@ -1365,14 +1788,13 @@ button {
   background: transparent;
   border: 0;
   border-radius: 9px;
-  opacity: 0;
   transform: translateY(-50%);
-  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease;
 }
 
-.report__session-list li:hover .report__session-remove,
-.report__session-remove:focus-visible {
-  opacity: 1;
+.report__session-remove .icon {
+  width: 18px;
+  height: 18px;
 }
 
 .report__session-remove:hover {
@@ -1574,6 +1996,40 @@ button {
   margin-top: 28px;
 }
 
+/* The widget popup's button, which only turns up once the reader has taken hold of the slider.
+   It comes down into place while the popup grows to make room, both over the same unhurried beat. */
+.widget-actions {
+  align-items: center;
+  justify-content: center;
+  height: 56px;
+  margin-top: 28px; /* 56 + 28 = --widget-grow, matching the reading above the slider */
+  overflow: hidden;
+  animation: widget-actions-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes widget-actions-in {
+  from {
+    height: 0;
+    margin-top: 0;
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+
+  to {
+    height: 56px;
+    margin-top: 28px;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scale__readout,
+  .widget-actions {
+    animation: none;
+  }
+}
+
 /* Animations
    ========================================================================== */
 
@@ -1698,16 +2154,6 @@ button {
     bottom: 16px;
   }
 
-  .pick-bar {
-    bottom: 16px;
-    padding-left: 16px;
-    font-size: 0.9rem;
-  }
-
-  .scale {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-  }
-
   .report__question,
   .report__reading,
   .report__sessions {
@@ -1734,5 +2180,542 @@ button {
   .welcome__input {
     padding: 14px 12px;
     text-align: center;
+  }
+}
+
+/* The widget drawer
+   ========================================================================== */
+
+/* The quieter of the two floating buttons: how many widgets the story has */
+.fab--quiet {
+  color: var(--ink-soft);
+  background: var(--surface);
+  box-shadow: 0 10px 24px -14px rgb(0 0 0 / 0.5), inset 0 0 0 1px var(--line-strong);
+}
+
+.fab--quiet:hover {
+  color: var(--accent-text);
+  background: var(--surface);
+  box-shadow: 0 10px 24px -14px rgb(0 0 0 / 0.5), inset 0 0 0 1px var(--accent);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  width: min(var(--drawer-w), 100vw);
+  height: 100vh;
+  height: 100dvh;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--line);
+  box-shadow: -20px 0 50px -30px rgb(0 0 0 / 0.6);
+  animation: slide-in 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes slide-in {
+  from { transform: translateX(100%); }
+}
+
+/* 24px down, so the title and its buttons sit level with the Log out button outside the drawer. */
+.drawer__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 16px 16px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer__title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.drawer__close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.drawer__close:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.drawer__body {
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.drawer__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drawer__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Takes you to the widget's line in the text without opening it */
+.drawer__find {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+  padding: 11px 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.drawer__find:hover {
+  border-color: var(--accent);
+  transform: translateX(-2px);
+}
+
+.drawer__question {
+  font-size: 0.92rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.drawer__where {
+  overflow: hidden;
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.drawer__remove {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.drawer__remove:hover {
+  color: var(--danger-text);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.drawer__remove .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.drawer__empty {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* The beat a dot gives when its widget is picked out of the drawer */
+.chapter__mark.is-found::after {
+  animation: dot-found 0.9s ease 3;
+}
+
+@keyframes dot-found {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 transparent; }
+  40% { transform: scale(1.7); box-shadow: 0 0 0 7px var(--accent-soft); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer {
+    animation: none;
+  }
+
+  /* No beat, but the dot still stands out while it is being pointed at. */
+  .chapter__mark.is-found::after {
+    animation: none;
+    transform: scale(1.5);
+    box-shadow: 0 0 0 5px var(--accent-soft);
+  }
+}
+
+/* The widget gallery
+   ========================================================================== */
+
+.gallery__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr));
+  gap: 18px;
+}
+
+.gallery__card {
+  padding: 24px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.gallery__name {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 500;
+}
+
+.gallery__about {
+  margin-top: 8px;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.gallery__preview-label {
+  margin-top: 20px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Stands the popup on the page colour, the way a reader meets it over the story. Centred in a box
+   tall enough for it to open out, so the preview grows in both directions as the real modal does. */
+.gallery__stage {
+  display: grid;
+  place-items: center;
+  min-height: 400px;
+  margin-top: 10px;
+  padding: 24px 20px;
+  background: var(--bg);
+  border-radius: 14px;
+}
+
+/* The popup itself carries .dialog, so it is styled by the same rules as the real one; only its
+   width is ours, since a dialog sizes itself against the window and this one sits in a card. */
+.gallery__popup {
+  width: min(440px, 100%);
+}
+
+/* The form is a real <dialog> too, so it has to be talked out of positioning itself. */
+.gallery__form {
+  position: static;
+  width: min(560px, 100%);
+  max-width: 100%;
+  margin: 0;
+}
+
+/* A form is tall, and it is here to be looked at rather than used. */
+.gallery__stage--form {
+  align-items: start;
+  min-height: 0;
+  padding: 24px 20px;
+}
+
+.gallery__note {
+  margin-top: 16px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* Stories put aside
+   ========================================================================== */
+
+.aside-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.aside-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 16px 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.aside-text {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+
+.aside-name {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.aside-meta {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+/* Nothing open: a library whose stories have all been put aside */
+.no-story {
+  padding: 8px 0 40px;
+}
+
+.no-story .story-meta {
+  margin-top: 12px;
+}
+
+.no-story__action {
+  margin-top: 24px;
+}
+
+/* Picture widgets
+   ========================================================================== */
+
+/* What the picked file looks like before it is stored */
+.image-preview {
+  margin-top: 14px;
+}
+
+.image-preview__img {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  border-radius: 12px;
+}
+
+.image-preview__note {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* The picture as the reader meets it: under a cover, with a line to drag across */
+.reveal {
+  --revealed: 0%;
+  position: relative; /* no clipping here, so the grip can sit proud of the frame */
+  margin-top: 20px;
+}
+
+.reveal__frame {
+  /* Positioned, so the line inside it is clipped by these rounded corners. Without this the line
+     belongs to .reveal instead and the frame's overflow never touches it. */
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 140px;
+  overflow: hidden;
+  /* A hatch, so the covered part reads as something held back rather than empty space. */
+  background:
+    repeating-linear-gradient(
+      135deg,
+      transparent 0 9px,
+      color-mix(in srgb, var(--ink) 5%, transparent) 9px 18px
+    ),
+    var(--bg);
+  /* An inset line rather than a border, so this box and .reveal share exactly the same edges and
+     the line and the grip can't sit a pixel apart. */
+  box-shadow: inset 0 0 0 1px var(--line);
+  border-radius: 14px;
+}
+
+/* Only the part to the left of the line is uncovered. */
+.reveal__img {
+  display: block;
+  width: 100%;
+  max-height: 46vh;
+  object-fit: contain;
+  clip-path: inset(0 calc(100% - var(--revealed)) 0 0);
+}
+
+.reveal__line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Its full width stays within the frame, so at either end it is a line rather than half of one.
+     The rounded corners still cut it top and bottom. */
+  left: clamp(1px, var(--revealed), calc(100% - 1px));
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* Rides the line, and may hang over the frame so it is never cut in half at either end. Hollow
+   until it is taken hold of, then filled — the same as the handle on the scale. */
+.reveal__grip {
+  position: absolute;
+  top: 50%;
+  left: var(--revealed);
+  width: 30px;
+  height: 30px;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 2px 10px -2px rgb(0 0 0 / 0.4);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.reveal.is-held .reveal__grip {
+  background: var(--accent);
+}
+
+
+/* Lies over the whole picture so it can be dragged from anywhere, and keeps its keyboard support. */
+/* Reaches a grip's width past each edge, so the grip can be taken hold of where it is drawn even
+   when it hangs over the frame. The thumb is the same width as the grip, which means its travel
+   still lines up exactly with the frame's own left and right edges. */
+.reveal__range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -15px;
+  width: calc(100% + 30px);
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  opacity: 0;
+  cursor: ew-resize;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.reveal__range::-webkit-slider-thumb {
+  width: 30px;
+  height: 120px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.reveal__range::-moz-range-thumb {
+  width: 30px;
+  height: 120px;
+  border: 0;
+}
+
+.reveal__range:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* A flash crosses the cover every couple of seconds, to say it is there to be dragged. It stops
+   the moment the reader takes hold. */
+.reveal__frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 38%,
+    color-mix(in srgb, var(--surface) 85%, transparent) 50%,
+    transparent 62%
+  );
+  transform: translateX(-100%);
+  pointer-events: none;
+  /* One pass, a second after the popup arrives, so it has settled before anything moves. */
+  animation: reveal-beckon 1.5s ease-in-out 1s 1;
+}
+
+@keyframes reveal-beckon {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+.reveal.is-held .reveal__frame::after,
+.reveal.is-revealed .reveal__frame::after {
+  content: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal__frame::after {
+    content: none;
+  }
+}
+
+/* Once it is off, the line and the grip have nothing left to do. */
+.reveal.is-revealed .reveal__line,
+.reveal.is-revealed .reveal__grip {
+  opacity: 0;
+}
+
+.reveal.is-revealed .reveal__range {
+  cursor: default;
+}
+
+.reveal__waiting {
+  padding: 34px 28px;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+
+/* Choosing a kind of widget
+   ========================================================================== */
+
+.choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 22px;
+}
+
+/* Each card arrives a moment after the one before it. */
+.choices__one {
+  display: grid;
+  place-items: center;
+  min-height: 92px;
+  padding: 18px 16px;
+  text-align: center;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
+}
+
+.choices__one:hover,
+.choices__one:focus-visible {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.choices__name {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .choices__one {
+    animation: none;
   }
 }
